@@ -4,7 +4,7 @@ version = "0.0.1"
 description = "Self-hostable agentic document engine: a small local model + retrieval/eval tooling that rivals frontier models on long-document QA, extraction and reporting."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = { text = "GPL-3.0-only" }
 authors = [{ name = "Aditya Menon" }]
 
 # Base deps are deliberately small so `uv sync` is fast and light on disk.
