@@ -1,7 +1,7 @@
 [project]
 name = "docket"
 version = "0.0.1"
-description = "Self-hostable agentic document engine: a small local model + retrieval/eval tooling that rivals frontier models on long-document QA, extraction and reporting."
+description = "Local RAG engine for long documents: hybrid retrieval, cross-encoder rerank, grounded generation, evaluated on FinanceBench."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "GPL-3.0-only" }
