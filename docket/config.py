@@ -8,6 +8,7 @@ the stock llama.cpp ``llama-server``, or Ollama. That single HTTP contract is th
 
 from __future__ import annotations
 
+import os
 from enum import Enum
 from pathlib import Path
 
@@ -22,8 +23,8 @@ def _project_root() -> Path | None:
     with a different CWD, and a CWD-relative ``.env`` / ``.docket_index`` silently
     vanishes there (embeddings read as "unconfigured", corpus reads as empty).
     Anchoring to the checkout root keeps a single source of truth. Returns None
-    for a pip-installed package (no pyproject alongside the code) — then we fall
-    back to CWD-relative defaults, which env vars can still override.
+    for an installed (wheel) copy — then state falls back to XDG dirs, which
+    env vars can still override.
     """
     for parent in Path(__file__).resolve().parents:
         if (parent / "pyproject.toml").is_file():
@@ -32,15 +33,19 @@ def _project_root() -> Path | None:
 
 
 _ROOT = _project_root()
-_ENV_FILE = str(_ROOT / ".env") if _ROOT else ".env"
+# Installed runs (uv tool / pip wheel) have no checkout root; fall back to XDG
+# dirs so state lands in stable per-user locations instead of the CWD du jour.
+_DATA_DIR = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / "docket"
+_CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "docket"
+_ENV_FILE = str(_ROOT / ".env") if _ROOT else str(_CONFIG_DIR / "env")
 # `.env.local` is the single machine-local override the UI writes to (Settings
 # page + BYOK keys). It layers *over* `.env`: pydantic-settings loads the files
 # in order and later files win, so a value set from the dashboard takes effect on
 # the next `load_settings()` without touching the hand-authored, comment-rich
 # `.env`. It is gitignored and written 0600 (it may hold API keys). One writer
 # for both knobs and secrets lives in `config_write.py` (CLAUDE.md: one impl).
-_ENV_LOCAL_FILE = str(_ROOT / ".env.local") if _ROOT else ".env.local"
-_DEFAULT_INDEX_DIR = str(_ROOT / ".docket_index") if _ROOT else ".docket_index"
+_ENV_LOCAL_FILE = str(_ROOT / ".env.local") if _ROOT else str(_CONFIG_DIR / "env.local")
+_DEFAULT_INDEX_DIR = str(_ROOT / ".docket_index") if _ROOT else str(_DATA_DIR / "index")
 
 
 class Profile(str, Enum):
@@ -95,14 +100,13 @@ class Settings(BaseSettings):
     request_timeout_s: float = 120.0
 
     # Lite-profile ingest/retrieval knobs. The persisted corpus (chunks + optional
-    # dense vectors) lives under index_dir; zero-config, embedded (docs Q13).
+    # dense vectors) lives under index_dir; zero-config, embedded.
     index_dir: str = _DEFAULT_INDEX_DIR
     chunk_words: int = 220        # target words per chunk
     chunk_overlap: int = 40       # word overlap between adjacent chunks
     retrieval_k: int = 20         # candidates pulled before rerank
     context_chunks: int = 6       # top chunks fed to the model as grounded context
-    max_hops: int = 2             # iterative agentic re-query budget (docs Q8)
-
+    max_hops: int = 2             # iterative agentic re-query budget
 
 def load_settings() -> Settings:
     return Settings()

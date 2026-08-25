@@ -40,6 +40,23 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["docket"]
+exclude = [
+    "**/__pycache__",
+    "**/*.py[cod]",
+    "**/.docket_index/**",
+    "**/node_modules/**",
+]
+
+# The `npm run build` output is gitignored, so hatchling's VCS filter drops it
+# from the package walk; force-include maps the built SPA into the wheel so a
+# release serves the dashboard with zero Node on the user side.
+[tool.hatch.build.targets.wheel.force-include]
+"docket/web/frontend/build" = "docket/web/frontend/build"
+
+# `uv build` produces the wheel FROM the sdist, so the SPA must ride along in
+# both targets or the sdist->wheel step can't find it.
+[tool.hatch.build.targets.sdist]
+force-include = { "docket/web/frontend/build" = "docket/web/frontend/build" }
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

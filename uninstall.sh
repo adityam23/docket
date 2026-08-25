@@ -1,26 +1,33 @@
 #!/usr/bin/env bash
-# docket uninstaller — shipped from day one (docs/decisions.md Q18).
-# Removes exactly what install.sh recorded in the manifest; asks first.
+# docket uninstaller. Removes exactly what install.sh put down:
+#   - the `uv tool` environment providing `dk`
+#   - any engine binary installed via --with-engine
+#   - the manifest + download prefix
+#   - with --data: the ingested index too (~/.local/share/docket/index)
+# Configuration never lives outside env vars and those files.
 set -euo pipefail
 
-PREFIX="${DK_PREFIX:-$HOME/.local/share/docket}"
+PREFIX=${DK_PREFIX:-$HOME/.local/share/docket}
 MANIFEST="$PREFIX/.install-manifest.txt"
 
-if [ ! -f "$MANIFEST" ]; then
-  echo "no install manifest at $MANIFEST — nothing to uninstall."
-  exit 0
+if command -v uv >/dev/null 2>&1; then
+  uv tool uninstall docket 2>/dev/null || true
 fi
 
-echo "This will remove:"; sed 's/^/  - /' "$MANIFEST"
-printf "proceed? [y/N] "; read -r ans
-case "$ans" in
-  y|Y|yes) ;;
-  *) echo "aborted."; exit 0 ;;
-esac
+if [ -f "$MANIFEST" ]; then
+  while IFS= read -r entry; do
+    case $entry in
+      uv-tool:*) ;;                                  # handled above
+      /*) rm -f "$entry" ;;
+    esac
+  done < "$MANIFEST"
+fi
 
-# Remove recorded paths (reverse order so files go before their dirs).
-tac "$MANIFEST" | while IFS= read -r path; do
-  [ -e "$path" ] && rm -rf "$path" && echo "removed $path"
-done
-rm -f "$MANIFEST"
-echo "docket uninstalled. (Downloaded models, if any, were left in place.)"
+if [ "${1:-}" = "--data" ]; then
+  data=${XDG_DATA_HOME:-$HOME/.local/share}/docket/index
+  rm -rf "$data"
+  echo "removed index: $data"
+fi
+
+rm -rf "$PREFIX"
+echo "docket removed."

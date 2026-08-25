@@ -102,6 +102,7 @@ def _write_env_local(env: dict[str, str]) -> None:
         + "".join(f"{k}={v}\n" for k, v in sorted(env.items()))
     )
     d = os.path.dirname(_ENV_LOCAL_FILE) or "."
+    os.makedirs(d, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=d, prefix=".env.local.", suffix=".tmp")
     try:
         os.fchmod(fd, 0o600)

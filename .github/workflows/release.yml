@@ -1,0 +1,53 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.11"
+      - run: uv sync
+      - run: uv run pytest
+
+  build-release:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: docket/web/frontend/package-lock.json
+      - name: build dashboard (static SPA served by FastAPI)
+        working-directory: docket/web/frontend
+        run: |
+          npm ci
+          npm run build
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.11"
+      - name: build wheel (SPA included)
+        run: uv build
+      - name: checksums
+        working-directory: dist
+        run: sha256sum *.whl > SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.whl
+            dist/SHA256SUMS
+          generate_release_notes: true
