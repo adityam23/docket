@@ -1,89 +1,96 @@
 # docket
 
-**A self-hostable finance-filings research assistant.** Live-ingest SEC filings,
-ask anything across your whole coverage universe, and get a **cited, confidence-
-scored** answer in seconds — running on your own hardware, with a **glass-box view
-of *why* the model answered** (SAE feature-attribution "lab mode") that the SaaS
-tools don't show.
+Local RAG engine for long documents: hybrid retrieval, cross-encoder rerank,
+grounded generation, evaluated on FinanceBench.
 
-> The headline is **transparency**: a novel interpretability layer, not a
-> "small model beats frontier" claim. The model is small and local because
-> white-box interpretability needs the weights (and because it fits 6 GB VRAM);
-> the retrieval/agent/eval tooling is what makes it good enough. We benchmark on
-> **FinanceBench** and report it *honestly* against a frontier baseline.
+Self-contained. The release wheel ships the dashboard; no engine install, no
+Node, no external services required to start. Works with any OpenAI-compatible
+`/v1` server (llama-server, Ollama) or a free-tier API key (Cerebras, Groq).
 
-Anchored to a concrete business case — a buy-side analyst who must read every
-filing before the alpha decays (see [`docs/case-study.md`](docs/case-study.md)) —
-so it's a real product, not a tech demo. Driven by real hiring-market demand
-(`agent` + `eval` are the two loudest signals across ~1000 analysed job postings);
-**not** a rehash of prior work. See [`docs/`](docs/index.md) for the full design;
-read **[`docs/decisions.md`](docs/decisions.md) § Session 2** for the reasoning.
+## Install
 
-## Status
+Linux and macOS:
 
-**Phase 1 (lite MVP) plumbing DONE** — ingest → retrieve → agent → answer runs
-end to end, offline-verified (20 pytest) and against a live backend (`dk chat`,
-`dk ask` with citations + 🟢/🟡/🔴 reliability from real per-token logprobs).
-Scanned-page OCR is wired through the backend's `/v1/ocr` (`ingest/_ocr_model.py`).
-Remaining per-phase backlog (embedding endpoint E2E, scanned-PDF verification,
-turbovec, reranker, eval harness, install/pages): `docs/roadmap.md`.
+```sh
+curl -fsSL https://raw.githubusercontent.com/adityam23/docket/main/install.sh -o install.sh
+sh install.sh
+```
+
+The installer downloads the latest release wheel, installs it as an isolated
+[uv tool](https://docs.astral.sh/uv/concepts/tools/), and puts `dk` on your
+PATH. State lands in XDG dirs (`~/.local/share/docket`, `~/.config/docket`).
+
+Optional local engine:
+
+```sh
+sh install.sh --with-engine /path/to/llama-server
+```
+
+This copies the binary next to `dk` as `docket-engine` and records it in the
+manifest. It is not started or configured for you.
+
+Uninstall:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/adityam23/docket/main/uninstall.sh -o uninstall.sh
+sh uninstall.sh          # add --data to also delete the ingested index
+```
 
 ## Quickstart (dev)
 
-```bash
-uv sync                       # base deps only (fast/light)
-uv run dk health              # check the local /v1 backend is reachable
-uv run dk chat "hello"        # one-shot chat smoke test
-uv run pytest                 # offline smoke tests
-uv run dk serve               # dashboard + API on http://127.0.0.1:8760
+```sh
+git clone https://github.com/adityam23/docket && cd docket
+uv sync                  # base deps only
+uv run dk serve          # dashboard + API on http://127.0.0.1:8760
+uv run dk chat "hello"   # one-shot generation smoke test
+uv run pytest            # offline suite, no backend needed
 ```
 
-Optional layers: `uv sync --extra agent` (LangGraph), `uv sync --extra ingest`.
+Extras: `uv sync --extra ingest` (PDF text extraction), `--extra agent`
+(LangGraph). The dashboard rebuilds with `cd docket/web/frontend && npm ci &&
+npm run build`; releases ship it prebuilt.
 
-## Dashboard (SvelteKit)
+## Configuration
 
-The primary surface is a SvelteKit observability dashboard (Svelte 5 runes,
-built to a static SPA that FastAPI serves — no Node at runtime):
+Every knob is a `DK_`-prefixed env var or a line in `.env`. Defaults are safe:
+without an embedding endpoint retrieval degrades to sparse BM25; without a
+reranker the fused RRF order stands. Nothing errors on missing backends.
 
-- **Overview** — document/chunk counts, embedding coverage, backend + model status.
-- **Documents** — every indexed doc, the ingest **stage** it reached
-  (queued → ocr → chunk → embed → index → embedded), coverage meters, and a live
-  folder-ingest runner that streams per-document stage transitions.
-- **Ask** — grounded, cited answers with the 🟢/🟡/🔴 reliability banner, token
-  surprisal, hop count, and the full **retrieval trace** (ranked hits + scores).
-- **Observability** — runtime config, retrieval knobs, embedding + backend health.
+| Variable | Purpose |
+|---|---|
+| `DK_BACKEND_URL` | `/v1` base of any OpenAI-compatible server. Default `http://127.0.0.1:11434/v1` |
+| `DK_CHAT_MODEL` | Model id served there. Default `gemma4:e2b` |
+| `DK_PROVIDER` | `local`, `cerebras`, or `groq` |
+| `DK_CEREBRAS_API_KEY` / `DK_GROQ_API_KEY` | Free-tier keys when `DK_PROVIDER != local` |
+| `DK_EMBED_URL` | Dedicated embeddings endpoint. Unset keeps sparse-only |
+| `DK_RERANK_URL` | Endpoint serving `/v1/rerank` (Cohere shape). Unset disables reranking |
 
-Build it once (needs Node ≥ 18); FastAPI then serves it at `/`:
+## How it works
 
-```bash
-cd docket/web/frontend
-npm install && npm run build      # → build/ (served by `dk serve`)
-npm run dev                       # optional: hot-reload dev, proxies /api → :8760
+```
+ingest:  pdf -> ocr? -> chunk -> embed? -> index (BM25 + optional vectors)
+answer:  query -> hybrid recall -> cross-encoder rerank? -> grounded LLM hops
+         -> cited answer + per-token confidence label
 ```
 
-The JSON API lives under `/api/*` (`/api/overview`, `/api/corpus`, `/api/config`,
-`/api/ask`, `/api/ingest` + `/api/ingest/status`) — usable headless too.
+One `/v1` client talks to every backend. Seams are explicit: `Corpus.dense_search`
+swaps vector stores, `Retriever(reranker=...)` swaps rankers, `Provider` swaps
+llama.cpp for hosted APIs without code changes. Degradation is graceful at each
+step, so the offline test suite runs the full pipeline against fakes.
 
-## Backend
+## Benchmarks
 
-Any OpenAI-compatible `/v1` server works — the stock llama.cpp `llama-server`,
-the [infengine](../infengine) Rust engine, or Ollama — configured via
-`DK_BACKEND_URL` (default `http://127.0.0.1:11434/v1`). Switch to a free-tier API
-with `DK_PROVIDER=cerebras|groq` + the matching key. Embeddings need a **dedicated**
-endpoint (`DK_EMBED_URL`) — the chat server is not an embedding server. See
-`docs/architecture.md`.
+Measured on FinanceBench with the production grounded prompt
+(`benchmarks/financebench/README.md` has reproduction commands):
 
-## Docs
+| Setup | Result |
+|---|---|
+| Oracle evidence (retrieval ceiling) | ~89% accuracy |
+| Full RAG, sparse-only, no reranker | ~19% accuracy, recall@6 ~0.52 |
+| + qwen3-reranker-0.6b | recall@6 ~0.79-0.84 across embedders |
 
-- `docs/decisions.md` — the finalised design in two grilling sessions; **read
-  Session 2 (2026-08-19, the case-study pivot) first.**
-- `docs/case-study.md` — the finance business case: user, pain, product mapping,
-  hosting topology, demo script, golden set. **What the engine is *for*.**
-- `docs/architecture.md` — components, the `/v1` boundary, the two profiles, the
-  hosting topology + retention.
-- `docs/stack.md` — the SOTA stack (verified Aug 2026) + phase-gated deps.
-- `docs/roadmap.md` — phased build plan + backlog.
+The reranker is the dominant lever. Embedding choice is secondary at k=6.
 
 ## License
 
-GPL-3.0 — see [`LICENSE`](LICENSE).
+GPL-3.0. See [LICENSE](LICENSE).
