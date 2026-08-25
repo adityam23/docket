@@ -1,0 +1,10 @@
+{
+  "model": "Qwen3.5-2B base",
+  "n": 34,
+  "accuracy": 0.529,
+  "correct": 18,
+  "cited": "26/29",
+  "refusal_ok": "5/5",
+  "hallucinated": 3,
+  "avg_latency_ms": 8020
+}

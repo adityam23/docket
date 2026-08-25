@@ -1,0 +1,18 @@
+import adapter from '@sveltejs/adapter-static';
+
+/** @type {import('@sveltejs/kit').Config} */
+const config = {
+	kit: {
+		// Single-page app: FastAPI serves the built bundle and falls back to
+		// index.html for client-side routes (see web/app.py). No Node at runtime.
+		adapter: adapter({
+			pages: 'build',
+			assets: 'build',
+			fallback: 'index.html',
+			precompress: false,
+			strict: false
+		})
+	}
+};
+
+export default config;

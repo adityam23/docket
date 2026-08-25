@@ -1,0 +1,496 @@
+/* docket — METRO design system (docs/design-language.md).
+   The mobile Windows Phone "Metro" experience, reproduced faithfully, then
+   finished to Apple's craft: typography IS the interface, content over chrome,
+   flat solid fields on a true-black canvas, ONE bold accent used sparingly,
+   and kinetic staggered motion. No borders-as-structure, no shadows, no
+   gradients, no rounded floating cards (pass 1's rejected skin).
+
+   Colour discipline: the magenta accent is DECORATION, never "this is correct".
+   The trust triad — green / amber / red — is reserved EXCLUSIVELY for the
+   reliability signal (trust tiles, reliability chips, caution banners). Red may
+   additionally mark hard failures (ingest/API errors); green and amber appear
+   nowhere else. Everything else is monochrome. */
+
+:root {
+	/* --- true-black surface stack (dark only, OLED heritage) --- */
+	--bg: #000;
+	--surface-1: #0a0a0a; /* subtle field on black */
+	--surface-2: #141414; /* tile / work-surface fill */
+	--surface-3: #1f1f1f; /* hover / raised flat field */
+	--line: #242424;      /* hairline separators inside dense lists only */
+	--line-strong: #333;
+
+	--text: #fff;
+	--text-dim: #b6b6b6;
+	--text-mute: #7d7d7d;
+	--text-faint: #4b4b4b;
+
+	/* --- THE accent: WP Magenta. Flat, bold, sparing. --- */
+	--accent: #d80073;
+	--accent-bright: #ff0080; /* hover/active lift of the same hue */
+	--accent-soft: rgba(216, 0, 115, 0.16);
+	--accent-line: rgba(216, 0, 115, 0.45);
+
+	/* --- trust triad — reliability ONLY (see header note) --- */
+	--ok: #56c98b;
+	--warn: #e3b341;
+	--bad: #ec6a6a;
+	--ok-soft: rgba(86, 201, 139, 0.14);
+	--warn-soft: rgba(227, 179, 65, 0.14);
+	--bad-soft: rgba(236, 106, 106, 0.14);
+
+	/* monochrome stand-ins for non-trust status so green/amber stay unique */
+	--neutral: #7d7d7d;
+	--neutral-soft: rgba(255, 255, 255, 0.08);
+	--info: #9a9eae;
+	--info-soft: rgba(154, 158, 174, 0.14);
+
+	/* --- geometry: square by default; ≤4px is the maximum Apple concession,
+	       spent only on controls (inputs/buttons), never on tiles/cards. --- */
+	--radius-tile: 0px;
+	--radius: 4px;
+	--radius-sm: 3px;
+
+	/* --- type: Segoe WP behaviour via the system humanist stack.
+	       Ramp = WP PhoneFontSize × ~0.8 for desktop; ratios are the point. --- */
+	--sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+	--mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+
+	--fs-huge: clamp(5rem, 16vw, 9.25rem);   /* 186.7px → hero numerals, Light */
+	--fs-page: clamp(2.6rem, 8vw, 3.6rem);   /* 72px → page title, SemiLight, bleeds off-edge */
+	--fs-xl: 2.125rem;                       /* 42.7px → section titles */
+	--fs-lg: 1.6rem;                         /* 32px → group headers (often dim) */
+	--fs-ml: 1.25rem;                        /* 25.3px */
+	--fs-md: 1.125rem;                       /* 22.7px */
+	--fs-normal: 1rem;                       /* 20px → body */
+	--fs-small: 0.875rem;                    /* captions — use sparingly */
+
+	--w-light: 300;
+	--w-semilight: 350;
+	--w-regular: 400;
+	--w-semibold: 600;
+
+	/* --- spacing: the 12px golden number; blocks at 24px; ONE left line --- */
+	--u: 12px;
+	--block: calc(var(--u) * 2);
+	--left-line: 24px;
+	--gutter: var(--u); /* uniform tile gutter — tiles read as one aligned field */
+
+	/* --- motion: Metro in motion. Stagger i×100ms is the reusable heart. --- */
+	--dur-fast: 0.1s;
+	--dur-turn: 0.35s;
+	--dur-cascade: 0.8s;
+	--dur-flip-in: 0.25s;
+	--dur-flip-out: 0.35s;
+	--ease-out: cubic-bezier(0.22, 0.61, 0.36, 1);
+	--ease-sine: cubic-bezier(0.39, 0.58, 0.57, 1);
+	--ease-spring: cubic-bezier(0.34, 1.32, 0.5, 1);
+
+	/* density modes on ONE token system */
+	--pad: calc(var(--u) * 2);
+	--tile-min: 200px;
+}
+
+[data-density='dense'],
+.dense {
+	--pad: 15px;
+	--tile-min: 180px;
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+
+body {
+	margin: 0;
+	font-family: var(--sans);
+	background: var(--bg);
+	color: var(--text);
+	-webkit-font-smoothing: antialiased;
+	text-rendering: optimizeLegibility;
+	font-size: 15px;
+	line-height: 1.55;
+}
+
+a { color: inherit; text-decoration: none; }
+a:hover { color: inherit; }
+
+h1, h2, h3 { margin: 0; font-weight: var(--w-semilight); letter-spacing: -0.01em; }
+
+code, .mono { font-family: var(--mono); }
+/* Tabular/lining numerals everywhere figures appear — analyst-grade columns. */
+.mono, .num, .figure, .table td.num, .stat .value, .tile-big {
+	font-variant-numeric: tabular-nums;
+}
+
+::selection { background: var(--accent); color: #fff; }
+
+* { scrollbar-width: thin; scrollbar-color: var(--line-strong) transparent; }
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 0; border: 2px solid var(--bg); }
+
+/* --- app shell: pivot chrome + one left line ------------------------------ */
+
+.app { display: flex; flex-direction: column; min-height: 100vh; }
+.main {
+	width: 100%; max-width: 1220px; margin: 0 auto;
+	padding: var(--block) var(--left-line) 96px;
+}
+
+/* Page title: big lowercase SemiLight that CLIPS off the right edge — never
+   wraps. The clip signals "there is more horizontally" (a defining Metro cue). */
+.page-head { margin-bottom: var(--block); overflow: hidden; }
+.page-title {
+	font-size: var(--fs-page);
+	font-weight: var(--w-semilight);
+	line-height: 1.04;
+	letter-spacing: -0.02em;
+	white-space: nowrap;
+	overflow: hidden;
+	margin: 0 0 var(--u);
+}
+.page-sub { color: var(--text-dim); margin: 0; max-width: 68ch; font-size: var(--fs-normal); }
+
+/* ALL-CAPS small utility label — the counterpoint to large lowercase display. */
+.caps {
+	font-size: 0.72rem;
+	font-weight: var(--w-regular);
+	text-transform: uppercase;
+	letter-spacing: 0.12em;
+	color: var(--text-mute);
+}
+.section-title {
+	font-size: var(--fs-xl);
+	font-weight: var(--w-semilight);
+	letter-spacing: -0.01em;
+	margin: calc(var(--block) * 1.25) 0 var(--u);
+}
+.group-header {
+	font-size: var(--fs-lg);
+	font-weight: var(--w-semilight);
+	color: var(--text-mute);
+	margin: var(--block) 0 var(--u);
+}
+
+/* --- pivots (typographic tabs): active bright, next peeks right ------------ */
+
+.pivots {
+	display: flex; align-items: baseline; gap: 28px;
+	overflow-x: auto; scrollbar-width: none;
+	padding-bottom: 2px;
+}
+.pivots::-webkit-scrollbar { display: none; }
+.pivot {
+	position: relative; background: none; border: none; cursor: pointer;
+	font: inherit; font-weight: var(--w-semilight);
+	font-size: var(--fs-md); letter-spacing: -0.01em;
+	color: var(--text-faint); padding: 4px 0; white-space: nowrap;
+	transition: color var(--dur-fast) var(--ease-out), font-size var(--dur-fast) var(--ease-out);
+	flex-shrink: 0;
+}
+.pivot:hover { color: var(--text-dim); }
+.pivot.active { color: var(--text); font-size: var(--fs-lg); }
+.pivot .badge {
+	margin-left: 8px; font: var(--w-regular) 0.72rem/1 var(--mono);
+	color: var(--text-mute); vertical-align: middle;
+}
+.pivot.active .badge { color: var(--accent); }
+
+/* --- the tile wall: a real grid, edge-to-edge, uniform small gutter -------- */
+
+.tile-wall {
+	display: grid; gap: var(--gutter);
+	grid-template-columns: repeat(6, minmax(0, 1fr));
+	grid-auto-rows: minmax(92px, auto);
+	grid-auto-flow: dense;
+}
+.tile-wall > * { min-width: 0; }
+
+.tile {
+	position: relative; overflow: hidden;
+	background: var(--surface-2);
+	border: none; border-radius: var(--radius-tile);
+	padding: var(--pad);
+	color: var(--text);
+	display: flex; flex-direction: column; gap: 6px;
+	transform-origin: left center;
+	transition: background var(--dur-fast) var(--ease-out);
+	/* tilt press feedback comes from the shared action; base transform stays clean */
+}
+a.tile:hover, button.tile:hover { text-decoration: none; background: var(--surface-3); }
+.tile.s-small { grid-column: span 2; }
+.tile.s-medium { grid-column: span 2; grid-row: span 2; }
+.tile.s-wide { grid-column: span 4; grid-row: span 2; }
+.tile.hero {
+	background: var(--accent); /* boldly accent-filled — the few, per the hybrid scheme */
+	color: #fff;
+}
+.tile.hero:hover { background: var(--accent-bright); }
+.tile .tile-label {
+	font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.12em;
+	color: var(--text-mute); font-weight: var(--w-regular);
+}
+.tile.hero .tile-label { color: rgba(255, 255, 255, 0.75); }
+.tile .tile-big {
+	font-size: var(--fs-xl); font-weight: var(--w-light); letter-spacing: -0.01em;
+	line-height: 1.15;
+}
+.tile .tile-big small { font-size: var(--fs-small); color: var(--text-dim); font-weight: var(--w-regular); }
+.tile .tile-sub { color: var(--text-dim); font-size: var(--fs-small); }
+.tile.hero .tile-sub { color: rgba(255, 255, 255, 0.85); }
+.tile .tile-foot { margin-top: auto; }
+/* count badge, top-right (iconic template) */
+.tile .badge-n {
+	position: absolute; top: 10px; right: 12px;
+	font: var(--w-light) 1.6rem/1 var(--sans);
+	font-variant-numeric: tabular-nums;
+	color: var(--text-dim);
+}
+.tile.hero .badge-n { color: rgba(255, 255, 255, 0.85); }
+
+/* --- panels / fields: flat dark surfaces, no borders, no shadows ----------- */
+
+.panel { background: var(--surface-2); border-radius: var(--radius-tile); }
+.panel-pad { padding: var(--pad); }
+.panel-title {
+	font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.12em;
+	color: var(--text-mute); font-weight: var(--w-regular); margin-bottom: 14px;
+	display: flex; align-items: center; gap: 8px;
+}
+.grid { display: grid; gap: var(--gutter); }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(var(--tile-min), 1fr)); gap: var(--gutter); }
+
+/* stat face: ALL-CAPS label over a big Light tabular numeral */
+.stat { position: relative; background: var(--surface-2); padding: var(--pad); }
+.stat .label {
+	color: var(--text-mute); font-size: 0.72rem; text-transform: uppercase;
+	letter-spacing: 0.12em; font-weight: var(--w-regular);
+}
+.stat .value {
+	font-size: var(--fs-xl); font-weight: var(--w-light); letter-spacing: -0.01em;
+	margin-top: 6px; line-height: 1.15;
+}
+.stat .value small { font-size: var(--fs-small); color: var(--text-dim); font-weight: var(--w-regular); }
+.stat .sub { color: var(--text-dim); font-size: var(--fs-small); margin-top: 4px; }
+.stat .spark { display: none; }
+
+/* --- chips: tiny flat fields, square-ish (pills are wrong) ----------------- */
+
+.chip {
+	display: inline-flex; align-items: center; gap: 6px;
+	font-size: 0.72rem; font-weight: var(--w-regular);
+	text-transform: uppercase; letter-spacing: 0.08em;
+	padding: 3px 8px; border-radius: 2px;
+	background: var(--neutral-soft); color: var(--text-dim);
+	white-space: nowrap;
+}
+.chip.mono { font-family: var(--mono); text-transform: none; letter-spacing: 0; }
+.chip .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex-shrink: 0; }
+.chip.ok { background: var(--ok-soft); color: var(--ok); }       /* reliability only */
+.chip.warn { background: var(--warn-soft); color: var(--warn); } /* reliability only */
+.chip.bad { background: var(--bad-soft); color: var(--bad); }    /* reliability / hard error */
+.chip.info { background: var(--info-soft); color: var(--info); }
+.chip.accent { background: var(--accent-soft); color: var(--accent-bright); }
+.chip.neutral { background: var(--neutral-soft); color: var(--text-dim); }
+
+/* --- meter: flat bar, square ends ------------------------------------------ */
+
+.meter { height: 6px; border-radius: 0; background: var(--surface-3); overflow: hidden; }
+.meter > span { display: block; height: 100%; background: var(--text-dim); transition: width var(--dur-turn) var(--ease-out); }
+.meter.ok > span { background: var(--text); }
+.meter.accent > span { background: var(--accent); }
+
+/* --- tables: typographic rows, hairlines only as quiet separators ---------- */
+
+.table { width: 100%; border-collapse: collapse; font-size: var(--fs-normal); }
+.table th {
+	text-align: left; color: var(--text-mute); font-weight: var(--w-regular);
+	font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.12em;
+	padding: 10px 14px; border-bottom: 1px solid var(--line);
+}
+.table td { padding: 13px 14px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+.table tr:last-child td { border-bottom: none; }
+.table tbody tr { transition: background var(--dur-fast); }
+.table tbody tr:hover { background: var(--surface-1); }
+.table .doc-id { font-family: var(--mono); font-weight: var(--w-regular); }
+.table .num { font-family: var(--mono); text-align: right; color: var(--text-dim); }
+
+/* --- forms / buttons: flat fields, ≤4px concession ------------------------- */
+
+textarea, input[type='text'], input[type='number'], input[type='password'], input[type='search'], select {
+	width: 100%; background: var(--surface-1); color: var(--text);
+	border: 1px solid var(--line-strong); border-radius: var(--radius);
+	padding: 11px 13px; font: inherit; font-size: 0.95rem; resize: vertical;
+	transition: border-color var(--dur-fast);
+}
+textarea:focus, input:focus, select:focus {
+	outline: none; border-color: var(--accent); box-shadow: none;
+}
+textarea::placeholder, input::placeholder { color: var(--text-faint); }
+select { appearance: none; cursor: pointer; }
+
+.field { display: flex; flex-direction: column; gap: 6px; }
+.field > label { font-size: 0.78rem; color: var(--text-mute); }
+.field .hint { font-size: 0.74rem; color: var(--text-faint); }
+.form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+@media (max-width: 640px) { .form-grid { grid-template-columns: 1fr; } }
+
+.btn {
+	display: inline-flex; align-items: center; gap: 8px; cursor: pointer;
+	font: inherit; font-weight: var(--w-semibold); font-size: 0.9rem;
+	padding: 10px 18px; border-radius: var(--radius); border: 1px solid transparent;
+	color: #fff; background: var(--accent);
+	transition: background var(--dur-fast), transform 0.05s;
+}
+.btn:hover { background: var(--accent-bright); text-decoration: none; }
+.btn:active { transform: translateY(1px); }
+.btn:disabled { opacity: 0.4; cursor: not-allowed; filter: none; }
+.btn.ghost { background: var(--surface-2); color: var(--text); border-color: var(--line-strong); }
+.btn.ghost:hover { background: var(--surface-3); }
+
+.icon-btn {
+	display: inline-grid; place-items: center;
+	background: transparent; border: 1px solid var(--line-strong); border-radius: var(--radius);
+	width: 30px; height: 30px; cursor: pointer; color: var(--text-dim);
+	transition: border-color var(--dur-fast), color var(--dur-fast), background var(--dur-fast);
+}
+.icon-btn:hover:not(:disabled) { border-color: var(--bad); color: var(--bad); background: var(--surface-1); }
+.icon-btn:disabled { opacity: 0.4; cursor: default; }
+
+/* --- list menu (Metro settings: open rows, generous space, no boxes) ------- */
+
+.list-menu { display: flex; flex-direction: column; }
+.list-row {
+	display: grid; grid-template-columns: 1fr auto; gap: 16px; align-items: center;
+	padding: 15px 4px; border-bottom: 1px solid var(--line);
+}
+.list-row:last-child { border-bottom: none; }
+.list-row .lr-label { font-weight: var(--w-regular); font-size: var(--fs-normal); }
+.list-row .lr-hint { font-size: var(--fs-small); color: var(--text-mute); margin-top: 2px; }
+.list-section-title {
+	font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.12em;
+	color: var(--text-mute); margin: calc(var(--block) * 1.25) 0 4px;
+}
+
+/* --- misc primitives -------------------------------------------------------- */
+
+.row { display: flex; align-items: center; gap: 10px; }
+.wrap { flex-wrap: wrap; }
+.spread { justify-content: space-between; }
+.muted { color: var(--text-dim); }
+.mute2 { color: var(--text-mute); }
+.small { font-size: var(--fs-small); }
+.kv { display: flex; justify-content: space-between; gap: 16px; padding: 9px 0; border-bottom: 1px solid var(--line); }
+.kv:last-child { border-bottom: none; }
+.kv .k { color: var(--text-mute); }
+.kv .v { font-family: var(--mono); color: var(--text); text-align: right; word-break: break-all; }
+
+.spin {
+	width: 15px; height: 15px; border: 2px solid rgba(255, 255, 255, 0.2);
+	border-top-color: var(--text); border-radius: 50%;
+	animation: spin 0.7s linear infinite; display: inline-block;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.empty { text-align: center; color: var(--text-mute); padding: 44px 20px; }
+.empty .big { color: var(--text-faint); margin-bottom: 10px; }
+.empty svg { width: 40px; height: 40px; }
+
+.banner {
+	display: flex; align-items: center; gap: 12px; padding: 13px 16px;
+	border-radius: var(--radius-sm); font-weight: var(--w-regular);
+	background: var(--surface-2);
+}
+.banner.ok { background: var(--ok-soft); color: var(--ok); }
+.banner.warn { background: var(--warn-soft); color: var(--warn); }
+.banner.bad { background: var(--bad-soft); color: var(--bad); }
+.banner.neutral { background: var(--surface-2); color: var(--text-dim); }
+
+/* Honest "not configured" state — states plainly what's absent and how to
+   enable it. Never a locked tease (anti-slop rule). */
+.degraded {
+	border: 1px dashed var(--line-strong); border-radius: var(--radius-tile);
+	padding: 24px; color: var(--text-dim); background: var(--surface-1);
+}
+.degraded .dg-title { font-weight: var(--w-semibold); color: var(--text); margin-bottom: 6px; }
+
+.degraded a, .banner a, .page-sub a { color: var(--accent-bright); }
+.degraded a:hover, .banner a:hover { text-decoration: underline; }
+
+.link { color: var(--accent-bright); }
+.link:hover { text-decoration: underline; }
+
+/* ==========================================================================
+   MOTION SYSTEM (docs/design-language.md §7) — GPU transforms + opacity only.
+   The stagger formula index × ~100ms is the reusable heart. Every effect here
+   honours prefers-reduced-motion AND the in-app [data-motion='reduced'] toggle
+   via the guards at the bottom of this file.
+   ========================================================================== */
+
+/* List cascade: rows wave in from the right (+80px → 0), sine, 800ms,
+   delay i×100ms + 100ms (capped so long lists don't wait forever). Set --i
+   inline on each child. */
+.cascade > * {
+	animation: cascade-in var(--dur-cascade) var(--ease-sine) both;
+	animation-delay: calc(min(var(--i, 0), 10) * 100ms + 100ms);
+}
+@keyframes cascade-in {
+	from { transform: translateX(80px); opacity: 0; }
+	to { transform: translateX(0); opacity: 1; }
+}
+
+/* Turnstile page-enter: elements swing in about the LEFT edge, 75°→0°,
+   ~350ms, exponential ease, staggered (header first, then rows). Set --i
+   explicitly for control; top-level route children inherit a default depth. */
+.turn > * {
+	transform-origin: left center;
+	animation: turnstile-in var(--dur-turn) var(--ease-out) both;
+	animation-delay: calc(min(var(--i, 0), 8) * 70ms);
+}
+.turn > :nth-child(2) { --i: 1; }
+.turn > :nth-child(3) { --i: 2; }
+.turn > :nth-child(4) { --i: 3; }
+.turn > :nth-child(5) { --i: 4; }
+.turn > :nth-child(6) { --i: 5; }
+.turn > :nth-child(7) { --i: 6; }
+@keyframes turnstile-in {
+	from { transform: perspective(1200px) rotateY(75deg); opacity: 0; }
+	to { transform: perspective(1200px) rotateY(0deg); opacity: 1; }
+}
+
+/* Simple fade-rise for small inserts (answers, drawers). */
+.fade-in { animation: fade-in var(--dur-turn) var(--ease-out) both; }
+@keyframes fade-in {
+	from { opacity: 0; transform: translateY(6px); }
+	to { opacity: 1; transform: none; }
+}
+
+/* --- reduced-motion guards: OS setting AND the in-app toggle --------------- */
+
+@media (prefers-reduced-motion: reduce) {
+	*, *::before, *::after {
+		animation-duration: 0.001ms !important;
+		animation-delay: 0ms !important;
+		animation-iteration-count: 1 !important;
+		transition-duration: 0.001ms !important;
+	}
+}
+[data-motion='reduced'] *, [data-motion='reduced'] *::before, [data-motion='reduced'] *::after {
+	animation-duration: 0.001ms !important;
+	animation-delay: 0ms !important;
+	animation-iteration-count: 1 !important;
+	transition-duration: 0.001ms !important;
+}
+
+/* --- responsive ------------------------------------------------------------ */
+
+@media (max-width: 900px) {
+	.tile-wall { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+	.tile.s-wide { grid-column: span 4; }
+}
+@media (max-width: 720px) {
+	.main { padding: 20px 16px 64px; --left-line: 16px; }
+	.tile-wall { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+	.tile.s-small, .tile.s-medium { grid-column: span 1; grid-row: auto; }
+	.tile.s-wide { grid-column: span 2; grid-row: auto; }
+	.form-grid { grid-template-columns: 1fr; }
+}
