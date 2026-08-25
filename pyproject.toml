@@ -40,12 +40,18 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["docket"]
-exclude = [
-    "**/__pycache__",
-    "**/*.py[cod]",
-    "**/.docket_index/**",
-    "**/node_modules/**",
-]
+    exclude = [
+        "**/__pycache__",
+        "**/*.py[cod]",
+        "**/.docket_index/**",
+        "**/node_modules/**",
+        # The SPA enters the wheel ONLY via force-include below. In a git tree the
+        # VCS filter drops the gitignored build dir from the walk, but a wheel built
+        # from an extracted sdist has no VCS context, so without this exclude the
+        # sdist's copy is walked AND force-included -> duplicate-path build error.
+        "docket/web/frontend/build/**",
+        "**/.gitkeep",
+    ]
 
 # The `npm run build` output is gitignored, so hatchling's VCS filter drops it
 # from the package walk; force-include maps the built SPA into the wheel so a

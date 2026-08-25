@@ -37,6 +37,7 @@ jobs:
         run: |
           npm ci
           npm run build
+          rm -f build/.gitkeep   # force-include bypasses excludes; keep it out of the wheel
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.11"
