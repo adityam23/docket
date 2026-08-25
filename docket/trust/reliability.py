@@ -1,6 +1,6 @@
 """Tier-1 trust layer: turn token logprobs into an uncertainty score and a
 traffic-light label a non-technical user can read. Tier-2 (white-box probe) and
-Tier-3 (Gemma Scope SAE lab mode) are roadmap — docs/decisions.md Q9.
+Tier-3 (Gemma Scope SAE lab mode) are roadmap.
 
 Dependency-free by design so it runs everywhere and degrades gracefully.
 """
@@ -23,7 +23,7 @@ def label_for_surprisal(h: float) -> str:
     thresholds live.
 
     THRESHOLDS ARE PLACEHOLDERS — they must be calibrated against the golden set
-    with the human-in-the-loop judge (docs/decisions.md Q11/Q17). Semantic
+    with the human-in-the-loop judge. Semantic
     entropy (sample-and-cluster) will augment this in phase-2.
     """
     if math.isnan(h):

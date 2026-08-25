@@ -1,4 +1,4 @@
-// The ONE Metro motion implementation (docs/design-language.md §7, TODO T19).
+// The ONE Metro motion implementation.
 // CSS classes in app.css carry the staggered entrances (cascade / turnstile —
 // `--i` × ~100ms is the reusable heart); this module carries what needs JS:
 //

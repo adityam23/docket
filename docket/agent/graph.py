@@ -1,5 +1,5 @@
 """The agent: grounded, cited answering with iterative agentic re-query and an
-always-on Tier-1 reliability label (docs/decisions Q8/Q9/Q15).
+always-on Tier-1 reliability label.
 
 ``answer()`` is the single orchestration implementation — a deterministic loop
 that both the CLI and the web ``/ask`` endpoint call, and that ``build_graph()``
@@ -158,7 +158,7 @@ def _citations(text: str, hits: list[dict]) -> list[Citation]:
     return [Citation.from_hit(hits[i - 1]) for i in idxs]
 
 
-# --- deterministic aggregation path (docs/decisions Q16: typed tools, no code-gen)
+# --- deterministic aggregation path (typed tools, no code-gen)
 #
 # A cross-document "total/average/max across a bunch of docs" question fails the
 # plain QA path because the model has to both find every value AND do arithmetic

@@ -1,5 +1,5 @@
 <script>
-	// Home — the Metro hub / Start board (docs/design-language.md §9, T18).
+	// Home — the Metro hub / Start board.
 	// A big lowercase title bleeding off the right edge; below it, a tile WALL on
 	// the real grid (small/medium/wide mix): the hero Ask tile boldly
 	// accent-filled, live tiles flipping only when their datum changes. A recent-

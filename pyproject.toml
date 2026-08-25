@@ -9,7 +9,7 @@ authors = [{ name = "Aditya Menon" }]
 
 # Base deps are deliberately small so `uv sync` is fast and light on disk.
 # Heavier, phase-gated layers (OCR, turbovec, eval, interpretability, the
-# Kafka/Spark platform) are documented in docs/stack.md and added when their
+# Kafka/Spark platform) are added when their
 # phase lands — keeping the resolver quick and the lite install tiny.
 dependencies = [
     "httpx>=0.27",

@@ -1,5 +1,5 @@
 <script>
-	// Observability — two pivots (docs/design-language.md §9, T18):
+	// Observability — two pivots:
 	//   Pipeline — live Kafka/Spark/dbt freshness+throughput. Config-gated: it
 	//              does not exist until this instance points at its own stream,
 	//              so it degrades to an honest empty state (never faked).

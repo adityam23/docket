@@ -1,5 +1,5 @@
 """Chunking with lineage. A chunk carries its origin (doc id, page, source path)
-so every retrieved span resolves back to an exact citation (docs/decisions Q15).
+so every retrieved span resolves back to an exact citation.
 
 Word-window chunking with overlap: dependency-free, deterministic, and good
 enough for the lite any-PDF path. Page boundaries are respected so a chunk never

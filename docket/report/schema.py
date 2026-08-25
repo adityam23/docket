@@ -1,4 +1,4 @@
-"""Structured, cited report schema (docs/decisions.md Q15). Flagship = an SEC
+"""Structured, cited report schema. Flagship = an SEC
 filing analysis with a reliability label the end user can read at a glance."""
 
 from __future__ import annotations
@@ -26,6 +26,6 @@ class ReportSection(BaseModel):
 
 class Report(BaseModel):
     title: str
-    reliability: str = Field(description="high | medium | low (docs/decisions Q9/Q15)")
+    reliability: str = Field(description="high | medium | low")
     sections: list[ReportSection] = Field(default_factory=list)
     # TODO(phase-1/3): metrics table, risk factors, red flags for the SEC report.

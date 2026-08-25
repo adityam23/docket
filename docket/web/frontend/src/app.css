@@ -1,4 +1,4 @@
-/* docket — METRO design system (docs/design-language.md).
+/* docket — METRO design system.
    The mobile Windows Phone "Metro" experience, reproduced faithfully, then
    finished to Apple's craft: typography IS the interface, content over chrome,
    flat solid fields on a true-black canvas, ONE bold accent used sparingly,
@@ -420,7 +420,7 @@ select { appearance: none; cursor: pointer; }
 .link:hover { text-decoration: underline; }
 
 /* ==========================================================================
-   MOTION SYSTEM (docs/design-language.md §7) — GPU transforms + opacity only.
+   MOTION SYSTEM — GPU transforms + opacity only.
    The stagger formula index × ~100ms is the reusable heart. Every effect here
    honours prefers-reduced-motion AND the in-app [data-motion='reduced'] toggle
    via the guards at the bottom of this file.

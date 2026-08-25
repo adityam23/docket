@@ -1,5 +1,5 @@
 """`dk` command-line entry point (secondary surface; the primary UX is the web
-app — docs/decisions.md Q12)."""
+app)."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ app = typer.Typer(
 
 @app.command()
 def health() -> None:
-    """Check the configured backend (llama-server / infengine / Ollama / API)."""
+    """Check the configured backend (llama-server / Ollama / an API provider)."""
     from .service import health as health_service
 
     info = health_service()
@@ -127,7 +127,7 @@ def ask(question: str) -> None:
             typer.echo(f"  - {c.doc_id} p.{c.page}")
 
 
-# TODO(phase-1): `report`, `eval`, `bench` — see docs/roadmap.md.
+# TODO(phase-1): `report`, `eval`, `bench`.
 
 
 def main() -> None:

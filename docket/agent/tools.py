@@ -1,5 +1,4 @@
-"""Deterministic, typed agent tools (NO code-gen / NO sandbox in v1 —
-docs/decisions.md Q16). These are the toolset that gets a small model on par
+"""Deterministic, typed agent tools (NO code-gen / NO sandbox in v1). These are the toolset that gets a small model on par
 with larger ones (Q8). Each is a plain function so it is trivially unit-testable
 and equally callable from the CLI, the web app, or a LangGraph node.
 
@@ -9,7 +8,7 @@ and equally callable from the CLI, the web app, or a LangGraph node.
     compute_metric      deterministic financial metric from extracted fields
     aggregate           deterministic sum/mean/min/max/count over cited values
     cite_page           resolve an answer span to an exact source citation
-    generate_report     assemble the structured, cited report (docs/decisions Q15)
+    generate_report     assemble the structured, cited report
 """
 
 from __future__ import annotations

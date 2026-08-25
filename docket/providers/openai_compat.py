@@ -1,5 +1,5 @@
 """ONE OpenAI-/v1 client, parameterised by base_url / api_key / model — reused
-for every backend (local llama-server / infengine / Ollama, plus Cerebras and
+for every backend (local llama-server / Ollama, plus Cerebras and
 Groq). One concept, one implementation (see CLAUDE.md 'Reusability')."""
 
 from __future__ import annotations
@@ -91,7 +91,7 @@ class OpenAICompatProvider:
         if not self._embed_url:
             raise RuntimeError(
                 "embeddings unconfigured — set DK_EMBED_URL to a dedicated "
-                "`llama-server --embeddings` endpoint (see docs/architecture.md)"
+                "`llama-server --embeddings` endpoint"
             )
         r = self._client.post(
             f"{self._embed_url}/embeddings",
@@ -113,7 +113,7 @@ class OpenAICompatProvider:
         if not self._rerank_url:
             raise RuntimeError(
                 "rerank unconfigured — set DK_RERANK_URL to a backend serving "
-                "`/v1/rerank` (see docs/architecture.md)"
+                "`/v1/rerank`"
             )
         if not documents:
             return []

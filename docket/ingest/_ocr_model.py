@@ -1,7 +1,7 @@
-"""Scanned-page OCR through infengine's `/v1/ocr` endpoint (Baidu
-Unlimited-OCR via the llama.cpp engine). The consumer never touches PDFs on
+"""Scanned-page OCR through a `/v1/ocr` endpoint (Baidu Unlimited-OCR served by
+a llama.cpp-based engine). The consumer never touches PDFs on
 the server side — this module rasterizes each page locally and posts the
-encoded image, per the infengine OCR contract (image in, text out).
+encoded image, per the OCR contract (image in, text out).
 
 Lazy imports keep the base install light: pymupdf is only needed when a
 page actually falls back to OCR, and the module is only imported then
@@ -18,7 +18,7 @@ from ..config import load_settings
 
 
 def ocr_page(path: str, page: int) -> str:
-    """OCR one 1-based page of a PDF via the configured infengine backend.
+    """OCR one 1-based page of a PDF via the configured backend.
 
     Rasterizes at ~200 DPI (the OCR model's sweet spot without bloating the
     request), encodes PNG, and POSTs to ``{DK_BACKEND_URL}/ocr`` (the URL

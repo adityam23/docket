@@ -1,4 +1,4 @@
-"""Explainable auto-evaluator (docs/decisions.md Q11): an XGBoost/LightGBM + SHAP
+"""Explainable auto-evaluator: an XGBoost/LightGBM + SHAP
 classifier over TRACE FEATURES (retrieval/rerank scores, logprob + semantic
 entropy, tool-call success, hop count) predicting hallucination/correctness —
 cheaper and less biased than pure LLM-judge, and it shows *why* it flagged.
@@ -19,4 +19,4 @@ TRACE_FEATURES = (
 
 def predict_hallucination(features: dict) -> float:
     """Return P(hallucination). TODO(phase-3): train on HITL-labelled traces."""
-    raise NotImplementedError("xai auto-eval not wired yet — see docs/roadmap.md backlog")
+    raise NotImplementedError("xai auto-eval not wired yet")

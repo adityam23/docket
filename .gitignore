@@ -42,3 +42,6 @@ node_modules/
 # Internal agent-session working docs — never publish
 HANDOFF.md
 TODO.md
+
+# Internal design docs — local only, never publish
+docs/

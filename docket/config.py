@@ -3,9 +3,7 @@
 ``.env`` file.
 
 The local backend is anything that speaks the OpenAI-compatible ``/v1`` API:
-the stock llama.cpp ``llama-server`` (what runs on this box today), the infengine
-Rust server, or Ollama. That single HTTP contract is the whole reconciliation —
-see docs/architecture.md.
+the stock llama.cpp ``llama-server``, or Ollama. That single HTTP contract is the whole backend boundary.
 """
 
 from __future__ import annotations
@@ -51,7 +49,7 @@ class Profile(str, Enum):
 
 
 class Provider(str, Enum):
-    local = "local"        # OpenAI-/v1 backend: llama-server | infengine | Ollama
+    local = "local"        # OpenAI-/v1 backend: llama-server | Ollama
     cerebras = "cerebras"  # free-tier API (~1M tok/day)
     groq = "groq"          # free-tier API (fast)
 
@@ -68,14 +66,14 @@ class Settings(BaseSettings):
     backend_url: str = "http://127.0.0.1:11434/v1"
     chat_model: str = "gemma4:e2b"  # e2b (not e4b) so chat + embed-gemma + OCR
     #                                 co-reside in 6 GB VRAM on an all-in-one
-    #                                 infengine; stock llama-server ignores this.
+    #                                 server; stock llama-server ignores this.
 
     # Embeddings need a DEDICATED model/endpoint — the shared chat `llama-server`
     # is NOT started with --embeddings (and a chat model's embeddings are poor
     # anyway). Default None => embeddings unconfigured and retrieval degrades to
     # sparse-only (graceful; keeps the backend boundary generic). Point this at a
     # separate `llama-server --embeddings` (e.g. EmbeddingGemma) via DK_EMBED_URL.
-    # An all-in-one infengine serves chat+embeddings on one /v1 base — there set
+    # An all-in-one server serves chat+embeddings on one /v1 base — there set
     # DK_EMBED_URL = DK_BACKEND_URL to turn dense retrieval on.
     embed_url: str | None = None
     embed_model: str = "embed-gemma:latest"
@@ -83,7 +81,7 @@ class Settings(BaseSettings):
     # Cross-encoder reranker over the fused candidates (the dominant FinanceBench
     # lever — perfect retrieval ≈ 89% vs basic RAG ≈ 19%; T26). Same backend
     # boundary as chat/embed: a POST to the OpenAI-style ``/v1/rerank`` on an
-    # all-in-one infengine (Cohere shape). Default None => no reranker and the
+    # all-in-one server (Cohere shape). Default None => no reranker and the
     # fused RRF order stands (graceful, offline-safe). Point DK_RERANK_URL at the
     # ``/v1`` base (e.g. = DK_BACKEND_URL) to turn reranking on; the seam only
     # uses rank ORDER, never an absolute score, so any served reranker fits.

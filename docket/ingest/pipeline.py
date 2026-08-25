@@ -1,6 +1,6 @@
 """Lite ingest pipeline: PDF folder → pages → chunks → (optional) embeddings →
 persisted Corpus. One place wires the stages together so the CLI and web share
-exactly one ingest path (docs/decisions Q13; CLAUDE.md reusability).
+exactly one ingest path (CLAUDE.md reusability).
 
 Embeddings are optional: when ``DK_EMBED_URL`` is unset the corpus is built with
 sparse-only retrieval in mind (no vectors) and retrieval degrades to BM25 — the

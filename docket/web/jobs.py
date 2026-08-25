@@ -5,7 +5,7 @@ and *watch* each document walk ocr → chunk → embed → index. This runs one 
 a time on a background thread and records per-document stage transitions, which
 the frontend polls via ``GET /api/ingest/status``.
 
-Single-user, local, one process (docs/decisions Q12/Q13) — so a process-local
+Single-user, local, one process — so a process-local
 registry is correct; no broker or DB. It reuses ``ingest_paths`` verbatim via its
 ``on_event`` hook, so there is exactly one ingest implementation.
 """

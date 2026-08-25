@@ -1,6 +1,6 @@
 """PDF → text with page lineage.
 
-Two tiers, chosen per page so the base install stays light (docs/stack.md):
+Two tiers, chosen per page so the base install stays light:
 
 1. **Born-digital PDFs** — extracted with ``pypdf`` (lazy import; comes with the
    ``ingest`` extra). No model, no GPU, works offline. This is the common
@@ -58,12 +58,12 @@ def _ocr_page_fallback(path: str, page: int) -> str:
     """Scanned page → OCR model. Lazy so text PDFs never trigger a model load."""
     try:
         # Drop-in seam: a dedicated OCR service/model (Unlimited-OCR / Surya).
-        # Kept import-guarded; not wired on this host (see docs/roadmap.md).
+        # Kept import-guarded; no OCR model served here yet.
         import docket.ingest._ocr_model as _m  # type: ignore
     except ImportError:
         raise RuntimeError(
             f"page {page} of {path} has no embedded text (scanned/image PDF) and "
-            "no OCR model is installed. Wire Unlimited-OCR/Surya per docs/stack.md "
+            "no OCR model is installed. Serve an OCR model at /v1/ocr "
             "or pre-OCR the file."
         ) from None
     return _m.ocr_page(path, page)  # pragma: no cover - requires OCR weights

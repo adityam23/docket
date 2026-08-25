@@ -7,7 +7,7 @@ disk). Deps: `pip install -U transformers peft trl bitsandbytes accelerate datas
 
 Pipeline fit: consumes `build_trainset.py` output; produces a LoRA adapter you
 merge and export to GGUF (`llama.cpp/convert_hf_to_gguf.py` + `llama-quantize`),
-then drop into the infengine `[[model]]` config and re-run `run_full.py` to score
+then drop into your engine's `[[model]]` config and re-run `run_full.py` to score
 the fine-tuned model on the same FinanceBench harness (the reward signal).
 
     python train_qlora.py \
@@ -110,7 +110,7 @@ def main() -> None:
     trainer.save_model(args.out)
     print(f"saved LoRA adapter to {args.out}")
     print("next: merge (peft merge_and_unload) -> convert_hf_to_gguf.py -> "
-          "llama-quantize Q4_K_M -> infengine [[model]] -> run_full.py")
+          "llama-quantize Q4_K_M -> engine [[model]] -> run_full.py")
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 """Bundled, opt-in sample corpus.
 
-Nothing auto-loads (docs/decisions: the index starts empty until the user acts).
+Nothing auto-loads (the index starts empty until the user acts).
 ``load_samples`` is invoked only on an explicit user action — the CLI ``dk
 samples`` command or the dashboard "Load sample documents" button — and adds a
 few *synthetic* documents so a new user can try retrieval/QA without exposing any

@@ -122,7 +122,7 @@
 				</div>
 			</div>
 			<select bind:value={form.provider} style="max-width: 320px">
-				<option value="local">local (llama-server / infengine / Ollama)</option>
+				<option value="local">local (llama-server / Ollama)</option>
 				<option value="cerebras">cerebras</option>
 				<option value="groq">groq</option>
 			</select>

@@ -17,8 +17,7 @@ from ..config import Settings, load_settings
 from ..ingest.embed import embeddings_available
 from ..ingest.index import Corpus
 
-# Keep this much disk free — never let ingestion fill the device (docs/decisions
-# Q13: honest about scale). Also a nominal per-document size for the very first
+# Keep this much disk free — never let ingestion fill the device (honest about scale). Also a nominal per-document size for the very first
 # estimate, before any real document has been ingested to measure against.
 _DISK_RESERVE_BYTES = 1 * 1024**3        # 1 GiB headroom
 _NOMINAL_BYTES_PER_DOC = 80_000          # ~a dozen chunks incl. 768-dim vectors

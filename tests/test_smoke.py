@@ -1,5 +1,4 @@
-"""Offline smoke tests — no network, no backend required (per docs/decisions.md:
-tests stay deterministic and offline). A live backend is exercised separately by
+"""Offline smoke tests — no network, no backend required; tests stay deterministic and offline. A live backend is exercised separately by
 `dk health` / `dk chat` in the handoff verification, not in pytest."""
 
 from docket.config import Profile, Provider, load_settings

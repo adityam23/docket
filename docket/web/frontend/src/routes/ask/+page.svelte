@@ -1,5 +1,5 @@
 <script>
-	// Ask — a real chat surface over the corpus (docs/design-language.md §9).
+	// Ask — a real chat surface over the corpus.
 	// Metro: turns are CONTENT, not heavy bubbles — everything on one left line;
 	// a turn is identified by its ALL-CAPS label ("you" / "answer") and type
 	// weight. Enter sends, Shift+Enter adds a newline; the pipeline streams into

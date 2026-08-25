@@ -11,7 +11,7 @@ Reuses the production stack verbatim — ``ingest_paths`` (chunk+embed), the
 ``Retriever`` (hybrid BM25+dense → RRF → rerank), and ``make_reranker`` — so a
 config that wins here is the config that ships. No parallel retrieval path.
 
-**Recoverable by design** (a co-tenant may restart the shared infengine backend
+**Recoverable by design** (a co-tenant may restart the shared backend
 mid-run): every embedded corpus is cached to ``--cache-dir`` (reloaded instantly
 on restart — the expensive embedding work is never redone), results are
 checkpointed to ``--out`` after each config, and embed/rerank calls wait for the
@@ -77,7 +77,7 @@ def _wait_backend(base_url: str, timeout: float = 600.0) -> bool:
                     return True
         except Exception:  # noqa: BLE001
             pass
-        print("    [backend] waiting for infengine to come back…", flush=True)
+        print("    [backend] waiting for the backend to come back…", flush=True)
         time.sleep(5)
     return False
 
@@ -135,7 +135,7 @@ def _embed_chunks(texts: list[str], s: Settings, base_url: str) -> list[list[flo
 
     def do(lo: int, hi: int) -> None:
         # Retry the SAME batch first: on a shared box the 500s are mostly transient
-        # (infengine swapping models under a co-tenant's load) and clear in <1s, so
+        # (the backend swapping models under a co-tenant's load) and clear in <1s, so
         # fast retries absorb them cheaply. Only escalate to a backend-wait if they
         # persist; only bisect+skip a size-1 batch that still fails (poison chunk).
         last = ""

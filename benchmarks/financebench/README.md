@@ -11,7 +11,7 @@ echo-proof derived arithmetic, distractors, table/unit traps, refusals). Serve a
 candidate on any `/v1` endpoint and score it:
 
 ```bash
-# serve a GGUF via infengine's prebuilt binary (its normal /v1 role)
+# serve a GGUF via any OpenAI-compatible server's prebuilt binary (its normal /v1 role)
 engine-cli serve --config cfg.toml          # [[model]] id + local gguf path, kv_cache="fp8"
 uv run python benchmarks/financebench/run.py \
     --base-url http://127.0.0.1:11434/v1 --model <id> --label "<name>" \
@@ -91,7 +91,7 @@ python train_qlora.py --base Qwen/Qwen3.5-4B \
     --train trainset/train.jsonl --val trainset/val.jsonl --epochs 3
 ```
 
-Then merge → `convert_hf_to_gguf.py` → `llama-quantize Q4_K_M` → infengine
+Then merge → `convert_hf_to_gguf.py` → `llama-quantize Q4_K_M` → your engine's
 `[[model]]` → re-run `run_full.py`. That last step closes the loop: the eval is
 the training reward signal.
 
@@ -115,7 +115,7 @@ uv run python -u benchmarks/financebench/sweep_recall.py \
 # rerankers: none / bge-reranker-v2-m3 / qwen3-reranker-0.6b
 ```
 
-It is **crash-recoverable** — a co-tenant may restart the shared infengine mid-run:
+It is **crash-recoverable** — a co-tenant may restart the shared backend mid-run:
 every embedded corpus is cached to `.sweep_cache/` (reloaded, never re-embedded),
 results checkpoint to `--out` after each config, and embed/rerank calls wait for
 the backend and retry instead of dying. Re-invoke with the same args to resume.

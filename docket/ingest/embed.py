@@ -1,7 +1,7 @@
 """Embed text through the configured provider.
 
 Requires a DEDICATED embedding endpoint (``DK_EMBED_URL``) — the shared chat
-server is not an embedding server (docs/architecture.md). When unconfigured,
+server is not an embedding server. When unconfigured,
 callers should degrade to sparse-only retrieval rather than fail; the retriever
 does exactly that.
 """

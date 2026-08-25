@@ -1,5 +1,5 @@
 """Provider contract + capability tiers. Capabilities drive graceful degradation
-of the trust/interpretability layer (docs/decisions.md Q9)."""
+of the trust layer."""
 
 from __future__ import annotations
 

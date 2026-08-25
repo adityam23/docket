@@ -1,5 +1,5 @@
 <script>
-	// The ONE monochrome line-glyph set (docs/design-language.md §8, TODO T20).
+	// The ONE monochrome line-glyph set.
 	// Simple geometric strokes, currentColor, centred — no emoji anywhere in the
 	// UI. The trust triad stays coloured DOTS (semantic signal), never glyphs.
 	let { name, size = 18, stroke = 1.6 } = $props();

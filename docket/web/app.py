@@ -1,4 +1,4 @@
-"""Local web app (FastAPI): the primary surface (docs/decisions Q12).
+"""Local web app (FastAPI): the primary surface.
 
 Two layers:
 - a JSON **observability API** under ``/api/*`` — corpus + per-document ingest

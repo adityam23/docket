@@ -1,7 +1,7 @@
 """Corpus store for the lite profile: chunks + optional dense vectors, with
 brute-force cosine search and zero-config JSON persistence.
 
-Design (docs/decisions Q13, docs/stack.md):
+Design:
 - **Lite** is embedded and honest about scale — an any-PDF folder is small, so a
   dependency-free brute-force cosine over stored vectors is correct and keeps
   `uv sync` tiny. `turbovec` (TurboQuant) is a drop-in dense backend for larger
@@ -67,7 +67,7 @@ class Corpus:
 
         Returns the number of chunks removed. Rebuilds the id index; O(n), which
         is correct for the small lite corpus. The inverse of ``add`` — the one
-        place a document leaves the index (docs/decisions Q13; CLAUDE.md reuse).
+        place a document leaves the index (CLAUDE.md reuse).
         """
         keep_chunks: list[Chunk] = []
         keep_vecs: list[list[float] | None] = []

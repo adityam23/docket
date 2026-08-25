@@ -1,5 +1,5 @@
 <script>
-	// The ONE live-tile primitive (CLAUDE.md reuse; docs/design-language.md §4–5).
+	// The ONE live-tile primitive (CLAUDE.md reuse).
 	// A tile is a FLAT SOLID FILL on the wall grid — no border, no shadow, square
 	// corners. It flips its face ONLY when its underlying datum changes ("calm
 	// alive"), via the shared WAAPI flip (motion.js) so the restart is always

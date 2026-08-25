@@ -1,4 +1,4 @@
-"""Per-chat trace capture + a small local trace store (docs/decisions Q12/Q13).
+"""Per-chat trace capture + a small local trace store.
 
 The agent loop (``graph.answer``) already builds the exact prompts, runs the model
 and scores reliability — but until now none of it was recorded, so Observability
