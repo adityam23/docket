@@ -1,0 +1,10 @@
+{
+  "model": "Gemma-4 E2B (baseline)",
+  "n": 34,
+  "accuracy": 0.559,
+  "correct": 19,
+  "cited": "14/29",
+  "refusal_ok": "5/5",
+  "hallucinated": 1,
+  "avg_latency_ms": 187
+}

@@ -1,0 +1,46 @@
+[project]
+name = "docket"
+version = "0.0.1"
+description = "Self-hostable agentic document engine: a small local model + retrieval/eval tooling that rivals frontier models on long-document QA, extraction and reporting."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Aditya Menon" }]
+
+# Base deps are deliberately small so `uv sync` is fast and light on disk.
+# Heavier, phase-gated layers (OCR, turbovec, eval, interpretability, the
+# Kafka/Spark platform) are documented in docs/stack.md and added when their
+# phase lands — keeping the resolver quick and the lite install tiny.
+dependencies = [
+    "httpx>=0.27",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "typer>=0.12",
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+]
+
+[project.scripts]
+dk = "docket.cli:main"
+
+[project.optional-dependencies]
+# uv sync --extra agent   (LangGraph agent + tools)
+agent = ["langgraph>=0.2", "langchain-core>=0.3"]
+# uv sync --extra ingest  (chunking, local index, PDF text — OCR/turbovec added later)
+# cryptography: pypdf's AES-decrypt backend — some real SEC filings are owner-password
+# encrypted (openable with an empty user password). Broadly-reusable stdlib-grade crypto.
+ingest = ["pypdf>=4.2", "duckdb>=1.0", "rank-bm25>=0.2", "cryptography>=3.1"]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["docket"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+addopts = "-q"

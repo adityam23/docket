@@ -1,0 +1,44 @@
+# Python / uv
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
+
+# Local secrets & data
+.env
+.env.local
+data/
+cache/
+*.sqlite
+
+# Models & artifacts (never commit weights)
+*.gguf
+models/
+.install-manifest.txt
+
+# Eval sweep cache & backup artifacts (never publish)
+.sweep_cache/
+*.bak
+*.bak-*
+
+# SEC filing PDFs — re-downloadable from EDGAR (build_trainset.py), 159 MB
+benchmarks/financebench/filings/
+
+# Runtime index & uploads (never publish corpus/traces)
+.docket_index/
+
+# Agent/harness state — never publish
+.omp/
+.claude/
+.serena/
+.cursor/
+.aider*
+node_modules/
+
+# Internal agent-session working docs — never publish
+HANDOFF.md
+TODO.md

@@ -1,0 +1,38 @@
+[
+  {
+    "doc_id": "sample-northwind-plan",
+    "title": "Northwind Protect — Sample Insurance Illustration",
+    "pages": [
+      {
+        "page": 1,
+        "text": "Northwind Protect Term Plan. Policyholder: Sample Customer. Sum assured: 5,000,000. Policy term: 20 years. Premium paying term: 20 years. This is a synthetic sample document bundled with docket to demonstrate long-document question answering; it contains no real personal data."
+      },
+      {
+        "page": 2,
+        "text": "Premium schedule. Annual premium: 14,400 payable each year. Semi-annual premium: 7,344 payable twice a year. Monthly premium: 1,260 payable every month. The monthly mode carries a 5 percent modal loading versus the annual mode. Total premium payable over the full 20 year term under the monthly mode is 302,400."
+      },
+      {
+        "page": 3,
+        "text": "Charges and benefits. Goods and services tax of 18 percent applies to the first year premium and 18 percent on renewal premiums for the risk portion. Death benefit equals the sum assured of 5,000,000. There is no maturity benefit under this pure term plan. Grace period for monthly mode is 15 days and for annual mode is 30 days."
+      }
+    ]
+  },
+  {
+    "doc_id": "sample-acme-10k",
+    "title": "Acme Corp — Sample Annual Report (10-K excerpt)",
+    "pages": [
+      {
+        "page": 1,
+        "text": "Acme Corp Annual Report. This is synthetic sample data. Total revenue for the fiscal year was 12,300,000 dollars, up from 9,800,000 dollars in the prior year. Gross profit was 5,100,000 dollars."
+      },
+      {
+        "page": 2,
+        "text": "Operating expenses totaled 3,400,000 dollars. Net income was 1,700,000 dollars. Cash and cash equivalents at year end were 2,050,000 dollars."
+      },
+      {
+        "page": 3,
+        "text": "Risk factors. The company faces supply-chain concentration risk, foreign-exchange exposure on roughly 30 percent of revenue, and dependence on three key customers who together account for 42 percent of sales."
+      }
+    ]
+  }
+]

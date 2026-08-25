@@ -1,0 +1,10 @@
+{
+  "model": "Qwen3.5-4B Claude-Opus-distill",
+  "n": 34,
+  "accuracy": 0.941,
+  "correct": 32,
+  "cited": "28/29",
+  "refusal_ok": "5/5",
+  "hallucinated": 2,
+  "avg_latency_ms": 7860
+}
