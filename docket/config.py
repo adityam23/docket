@@ -105,7 +105,7 @@ class Settings(BaseSettings):
     chunk_words: int = 220        # target words per chunk
     chunk_overlap: int = 40       # word overlap between adjacent chunks
     retrieval_k: int = 20         # candidates pulled before rerank
-    context_chunks: int = 6       # top chunks fed to the model as grounded context
+    context_chunks: int = 10      # top chunks fed to the model (FinanceBench: 82.0% @10 vs 68.0% @6)
     max_hops: int = 2             # iterative agentic re-query budget
 
 def load_settings() -> Settings:

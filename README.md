@@ -84,18 +84,19 @@ step, so the offline test suite runs the full pipeline against fakes.
 ## Benchmarks
 
 FinanceBench, 150 questions, production grounded prompt, shipped retrieval
-winner (`embed-gemma` + `qwen3-reranker-0.6b`). Two metrics, never mixed:
-**answer accuracy** (numeric match within tolerance for metrics questions,
-Claude-judged equivalence for free-form ones) and **gold-evidence recall@k**
-(token overlap of retrieved chunks vs the gold evidence span). Reproduction
-commands: [`benchmarks/financebench/README.md`](benchmarks/financebench/README.md).
+winner (`embed-gemma` + `qwen3-reranker-0.6b`, k=10 context). Two metrics,
+never mixed: **answer accuracy** (numeric match within tolerance for metrics
+questions, Claude-judged equivalence for free-form ones) and **gold-evidence
+recall@k** (token overlap of retrieved chunks vs the gold evidence span).
+Reproduction commands:
+[`benchmarks/financebench/README.md`](benchmarks/financebench/README.md).
 
 Answer accuracy:
 
-| Generator | Oracle evidence | Full RAG @6 |
-|---|---|---|
-| Qwen3.5-4B Opus-distill | **80.7%** | **68.0%** |
-| gemma4:e2b (default) | 55.3% | 40.0% |
+| Generator | Oracle evidence | Full RAG @6 | Full RAG @10 (shipped) |
+|---|---|---|---|
+| Qwen3.5-4B Opus-distill | 80.7% | 68.0% | **82.0%** |
+| gemma4:e2b (default chat model) | 55.3% | 40.0% | — |
 
 Retrieval recall@6 / recall@10 at threshold 0.5 (36,920 chunks):
 
@@ -105,8 +106,10 @@ Retrieval recall@6 / recall@10 at threshold 0.5 (36,920 chunks):
 | bge-m3 (1024d) | 0.513 / 0.600 | 0.747 / 0.807 | 0.793 / 0.847 |
 | qwen3-embedding (1024d) | 0.540 / 0.667 | 0.793 / 0.860 | **0.840 / 0.913** |
 
-The cross-encoder reranker is the dominant lever (+31 pts recall@6 over the
-fused order); embedder choice barely matters once a good ranker is in place.
+Raising the context from 6 to 10 chunks recovers +14 pt of answer accuracy,
+closing the gap to the oracle ceiling; at k=10 retrieval is no longer the
+distill's bottleneck. The cross-encoder reranker remains the dominant retrieval
+lever (+31 pts recall@6 over the fused order).
 
 ## License
 

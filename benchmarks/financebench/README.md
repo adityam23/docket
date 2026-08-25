@@ -159,7 +159,16 @@ uv run python benchmarks/financebench/run_full.py \
     --docs-dir benchmarks/financebench/filings \
     --embed-url http://127.0.0.1:11434/v1 --embed-model embed-gemma:latest \
     --rerank-url http://127.0.0.1:11434/v1 --rerank-model qwen3-reranker-0.6b:latest \
-    --retrieval-k 6 --export results/responses/rag_<name>.jsonl      # Phase-A winner
+    --retrieval-k 10 --export results/responses/rag_<name>.jsonl     # shipped k
 ```
 
+**Phase-B result (2026-08-25, distill, winner retriever):** k=10 ships.
+`context_chunks=10` scores **82.0% (123/150)** full-RAG vs 68.0% at k=6 (+14 pt).
+That is statistically indistinguishable from the 80.7% oracle ceiling on this run
+pair (independent generations: 18 items flip in k10's favour, 16 in oracle's,
+mostly free-form refusals and empty-response failures) — at k=10 retrieval is no
+longer the distill's bottleneck. Verdicts:
+`results/responses/verdicts_rag_qwen35_rag_k10.jsonl`.
+
 The generator fine-tune (§3–4) only raises the ceiling retrieval can reach.
+
