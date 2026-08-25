@@ -43,6 +43,7 @@ node_modules/
 HANDOFF.md
 TODO.md
 CLAUDE.md
+run_sweep_resilient.sh
 
 # Internal design docs — local only, never publish
 docs/
