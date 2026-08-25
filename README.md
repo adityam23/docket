@@ -86,4 +86,4 @@ endpoint (`DK_EMBED_URL`) — the chat server is not an embedding server. See
 
 ## License
 
-MIT.
+GPL-3.0 — see [`LICENSE`](LICENSE).
