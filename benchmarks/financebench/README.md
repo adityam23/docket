@@ -29,9 +29,9 @@ Result (2026-08-22, Q4_K_M, RTX 3060): **Qwen3.5-4B Claude-Opus-distill 94% (32/
 auto-cached to `data/`) and scores in **oracle-evidence** mode (generator in
 isolation, fed the gold evidence). Scoring is numeric-first (deterministic).
 
-**Grading is Claude, not a small model.** This dev box is a 6 GB GPU that serves
-~one model at a time, and a small-model judge is noisy on financial free-form
-answers, so generation and grading are **decoupled**:
+**Grading is Claude, not a small model.** The 6 GB target GPU serves ~one model
+at a time, and a small-model judge is noisy on financial free-form answers, so
+generation and grading are **decoupled**:
 
 ```bash
 # 1. generate + export responses (numeric matcher auto-resolves numeric rows)
