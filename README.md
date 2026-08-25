@@ -5,7 +5,8 @@ grounded generation, evaluated on FinanceBench.
 
 Self-contained. The release wheel ships the dashboard; no engine install, no
 Node, no external services required to start. Works with any OpenAI-compatible
-`/v1` server (llama-server, Ollama) or a free-tier API key (Cerebras, Groq).
+`/v1` server or a free-tier API key (Cerebras, Groq); the supported engine is
+**mettle**.
 
 ## Install
 
@@ -23,7 +24,7 @@ PATH. State lands in XDG dirs (`~/.local/share/docket`, `~/.config/docket`).
 Optional local engine:
 
 ```sh
-sh install.sh --with-engine /path/to/llama-server
+sh install.sh --with-engine /path/to/mettle
 ```
 
 This copies the binary next to `dk` as `docket-engine` and records it in the
