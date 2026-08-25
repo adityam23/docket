@@ -5,7 +5,7 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 dist/
-build/
+/build/
 *.egg-info/
 
 # Local secrets & data
