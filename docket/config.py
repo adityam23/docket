@@ -84,14 +84,14 @@ class Settings(BaseSettings):
     embed_model: str = "embed-gemma:latest"
 
     # Cross-encoder reranker over the fused candidates (the dominant FinanceBench
-    # lever — perfect retrieval ≈ 89% vs basic RAG ≈ 19%; T26). Same backend
+    # lever — Phase-A sweep: recall@6 0.840 vs 0.527 unreranked, n=150; T26). Same backend
     # boundary as chat/embed: a POST to the OpenAI-style ``/v1/rerank`` on an
     # all-in-one server (Cohere shape). Default None => no reranker and the
     # fused RRF order stands (graceful, offline-safe). Point DK_RERANK_URL at the
     # ``/v1`` base (e.g. = DK_BACKEND_URL) to turn reranking on; the seam only
     # uses rank ORDER, never an absolute score, so any served reranker fits.
     rerank_url: str | None = None
-    rerank_model: str = "bge-reranker-v2-m3:latest"
+    rerank_model: str = "qwen3-reranker-0.6b:latest"
 
     # BYO keys for the free-tier API providers.
     cerebras_api_key: str | None = None

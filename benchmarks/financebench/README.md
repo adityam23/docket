@@ -97,7 +97,8 @@ the training reward signal.
 
 ## 5. Retrieval (the dominant FinanceBench lever)
 
-FinanceBench is retrieval-bound (perfect retrieval ≈ 89% vs basic RAG ≈ 19%), so
+Measured on the shipped stack (post-scoring-fix, 2026-08-25): FinanceBench is
+retrieval-bound — oracle ceiling 80.7% vs 68.0% at full-RAG @6 for the distill — so
 the retriever is optimised *before* spending generator tokens, in two phases:
 
 **Phase A — recall sweep (generator-free, deterministic).** `sweep_recall.py`

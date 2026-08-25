@@ -68,10 +68,13 @@ reranker the fused RRF order stands. Nothing errors on missing backends.
 ## How it works
 
 ```
-ingest:  pdf -> ocr? -> chunk -> embed? -> index (BM25 + optional vectors)
-answer:  query -> hybrid recall -> cross-encoder rerank? -> grounded LLM hops
-         -> cited answer + per-token confidence label
+ingest:  pdf -> ocr -> chunk -> embed -> index (BM25 + optional vectors)
+answer:  query -> hybrid recall -> RRF fusion -> cross-encoder rerank
+         -> grounded LLM hops -> cited answer + per-token confidence label
 ```
+
+Stages marked without qualifiers are always on; `ocr`, `embed`, and `rerank`
+activate only when their endpoint is configured, degrading gracefully otherwise.
 
 One `/v1` client talks to every backend. Seams are explicit: `Corpus.dense_search`
 swaps vector stores, `Retriever(reranker=...)` swaps rankers, `Provider` swaps
@@ -80,16 +83,30 @@ step, so the offline test suite runs the full pipeline against fakes.
 
 ## Benchmarks
 
-Measured on FinanceBench with the production grounded prompt
-(`benchmarks/financebench/README.md` has reproduction commands):
+FinanceBench, 150 questions, production grounded prompt, shipped retrieval
+winner (`embed-gemma` + `qwen3-reranker-0.6b`). Two metrics, never mixed:
+**answer accuracy** (numeric match within tolerance for metrics questions,
+Claude-judged equivalence for free-form ones) and **gold-evidence recall@k**
+(token overlap of retrieved chunks vs the gold evidence span). Reproduction
+commands: [`benchmarks/financebench/README.md`](benchmarks/financebench/README.md).
 
-| Setup | Result |
-|---|---|
-| Oracle evidence (retrieval ceiling) | ~89% accuracy |
-| Full RAG, sparse-only, no reranker | ~19% accuracy, recall@6 ~0.52 |
-| + qwen3-reranker-0.6b | recall@6 ~0.79-0.84 across embedders |
+Answer accuracy:
 
-The reranker is the dominant lever. Embedding choice is secondary at k=6.
+| Generator | Oracle evidence | Full RAG @6 |
+|---|---|---|
+| Qwen3.5-4B Opus-distill | **80.7%** | **68.0%** |
+| gemma4:e2b (default) | 55.3% | 40.0% |
+
+Retrieval recall@6 / recall@10 at threshold 0.5 (36,920 chunks):
+
+| Embedder | no reranker | + bge-reranker-v2-m3 | + qwen3-reranker-0.6b |
+|---|---|---|---|
+| embed-gemma (768d) | 0.527 / 0.613 | 0.773 / 0.840 | **0.840 / 0.900** |
+| bge-m3 (1024d) | 0.513 / 0.600 | 0.747 / 0.807 | 0.793 / 0.847 |
+| qwen3-embedding (1024d) | 0.540 / 0.667 | 0.793 / 0.860 | **0.840 / 0.913** |
+
+The cross-encoder reranker is the dominant lever (+31 pts recall@6 over the
+fused order); embedder choice barely matters once a good ranker is in place.
 
 ## License
 

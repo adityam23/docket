@@ -299,7 +299,7 @@ def main() -> None:
     ap.add_argument("--embed-url", help="/v1 base serving the finance embedder")
     ap.add_argument("--embed-model", default="bge-m3:latest")
     ap.add_argument("--rerank-url", help="/v1 base serving the cross-encoder reranker")
-    ap.add_argument("--rerank-model", default="bge-reranker-v2-m3:latest")
+    ap.add_argument("--rerank-model", default="qwen3-reranker-0.6b:latest")
     ap.add_argument("--retrieval-k", type=int, default=6, help="chunks fed as context in full-RAG")
     ap.add_argument("--corpus-cache", help="reuse the Phase-A sweep's per-filing embedded corpora "
                     "(dir, e.g. benchmarks/financebench/.sweep_cache) instead of re-embedding")
