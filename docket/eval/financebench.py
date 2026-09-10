@@ -17,7 +17,7 @@ from the provided evidence, ground truth is exact and no real filing figures are
 fabricated (see ``benchmarks/financebench/smoke_set.jsonl``).
 
 Dependency-light on purpose (pure Python + the OpenAI-/v1 ``Provider``) so it
-runs against any reachable candidate, including a local ``llama-server``.
+runs against any reachable engine (mettle is the supported one).
 """
 
 from __future__ import annotations

@@ -17,7 +17,7 @@ app = typer.Typer(
 
 @app.command()
 def health() -> None:
-    """Check the configured backend (llama-server / Ollama / an API provider)."""
+    """Check the engine (mettle) and the configured model surface."""
     from .service import health as health_service
 
     info = health_service()
@@ -35,7 +35,7 @@ def chat(prompt: str) -> None:
 
 @app.command()
 def embed(text: str) -> None:
-    """Embed a string (needs DK_EMBED_URL configured)."""
+    """Embed a string through the engine (smoke test)."""
     s = load_settings()
     vec = get_provider(s).embed([text])[0]
     typer.echo(f"dim={len(vec)} head={[round(x, 4) for x in vec[:5]]}")
@@ -57,13 +57,13 @@ def serve(host: str = "127.0.0.1", port: int = 8760, reload: bool = True) -> Non
 
 @app.command()
 def ingest(folder: str) -> None:
-    """Ingest every PDF under FOLDER into the local index (OCR→chunk→embed→index)."""
+    """Ingest every PDF under FOLDER: OCR→chunk→post to the engine collection."""
     from .ingest.pipeline import ingest_folder
 
     s = load_settings()
     corpus = ingest_folder(folder, settings=s)
     typer.echo(f"indexed {len(corpus)} chunks → {s.index_dir} "
-               f"(dense={'on' if corpus.has_vectors else 'off (sparse-only)'})")
+               f"(lineage rows → {s.index_dir}; chunks live engine-side)")
 
 
 @app.command()
