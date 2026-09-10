@@ -48,8 +48,8 @@ uv run pytest            # offline suite, no backend needed
 ```
 
 Extras: `uv sync --extra ingest` (PDF text extraction), `--extra agent`
-(LangGraph). The dashboard rebuilds with `cd docket/web/frontend && npm ci &&
-npm run build`; releases ship it prebuilt.
+(LangGraph). The dashboard is a SvelteKit (Svelte 5) SPA: rebuild it with
+`cd docket/web/frontend && npm ci && npm run build`; releases ship it prebuilt.
 
 ## Configuration
 
@@ -65,6 +65,8 @@ reranker the fused RRF order stands. Nothing errors on missing backends.
 | `DK_CEREBRAS_API_KEY` / `DK_GROQ_API_KEY` | Free-tier keys when `DK_PROVIDER != local` |
 | `DK_EMBED_URL` | Dedicated embeddings endpoint. Unset keeps sparse-only |
 | `DK_RERANK_URL` | Endpoint serving `/v1/rerank` (Cohere shape). Unset disables reranking |
+| `DK_EMBED_MODEL` | Embedding model id served at `DK_EMBED_URL`. Default `embed-gemma:latest` |
+| `DK_RERANK_MODEL` | Reranker model id served at `DK_RERANK_URL`. Default `qwen3-reranker-0.6b:latest` |
 
 ## How it works
 
