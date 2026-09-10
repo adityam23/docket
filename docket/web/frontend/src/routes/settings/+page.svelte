@@ -42,6 +42,7 @@
 			max_hops: r.max_hops,
 			request_timeout_s: cfg.request_timeout_s
 		};
+		original = { ...form };
 	}
 
 	async function load() {
@@ -95,7 +96,6 @@
 		}
 	}
 
-	let engineReachable = $derived(!!(health && health.ok));
 </script>
 
 <h1 class="page-title">settings</h1>
