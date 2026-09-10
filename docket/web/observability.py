@@ -56,6 +56,10 @@ class DocView:
     coverage: float     # vectorized / chunks  (embedding coverage, 0..1)
     stage: str          # queued | indexed | embedding | embedded
     chars: int          # total text characters (rough corpus weight)
+    form_type: str = ""   # filing metadata (T22), empty when unknown
+    company: str = ""
+    ticker: str = ""
+    fiscal_period: str = ""
 
 
 def _doc_stage(chunks: int, vectorized: int, dense_on: bool) -> str:
@@ -86,7 +90,9 @@ def corpus_stats(settings: Settings | None = None, *, corpus: Corpus | None = No
     for ch, vec in zip(c.chunks, c.vectors):
         d = docs.setdefault(
             ch.doc_id,
-            {"source": ch.source, "pages": set(), "chunks": 0, "vectorized": 0, "chars": 0},
+            {"source": ch.source, "pages": set(), "chunks": 0, "vectorized": 0, "chars": 0,
+             "form_type": ch.form_type, "company": ch.company, "ticker": ch.ticker,
+             "fiscal_period": ch.fiscal_period},
         )
         d["chunks"] += 1
         d["chars"] += len(ch.text)
@@ -114,6 +120,10 @@ def corpus_stats(settings: Settings | None = None, *, corpus: Corpus | None = No
                 coverage=round(vectorized / chunks, 4) if chunks else 0.0,
                 stage=_doc_stage(chunks, vectorized, dense_on),
                 chars=d["chars"],
+                form_type=d["form_type"],
+                company=d["company"],
+                ticker=d["ticker"],
+                fiscal_period=d["fiscal_period"],
             )
         )
 

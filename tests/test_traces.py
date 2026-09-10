@@ -49,7 +49,9 @@ def test_answer_without_sink_is_unchanged():
 
 def test_hit_view_shape():
     v = hit_view({"chunk_id": "c#0", "doc_id": "d", "page": 2, "score": 0.5, "rank": 1, "text": "hi"})
-    assert v == {"chunk_id": "c#0", "doc_id": "d", "page": 2, "score": 0.5, "rank": 1, "text": "hi"}
+    assert v == {"chunk_id": "c#0", "doc_id": "d", "page": 2, "score": 0.5, "rank": 1,
+                 "form_type": "", "company": "", "ticker": "", "fiscal_period": "",
+                 "text": "hi"}
     assert hit_view({})["text"] == ""  # missing text → empty, never None
 
 

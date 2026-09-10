@@ -98,16 +98,28 @@ class Corpus:
         scored.sort(key=lambda t: t[1], reverse=True)
         return scored[:k]
 
-    # --- persistence (zero-config JSON; DuckDB is the platform-profile swap) ---
+    def save(self, path: str, backend: str = "jsonl") -> None:
+        """Persist the corpus under ``path``.
 
-    def save(self, path: str) -> None:
+        ``backend`` selects the store: ``"jsonl"`` (default, lite, zero-config)
+        or ``"duckdb"`` (platform, SQL-backed). The default keeps every existing
+        caller working unchanged; the platform profile passes ``duckdb``.
+        """
+        if backend == "duckdb":
+            from .duckdb_store import save as _save_db
+            _save_db(self, path)
+            return
         os.makedirs(path, exist_ok=True)
         with open(os.path.join(path, "corpus.jsonl"), "w") as f:
             for ch, vec in zip(self.chunks, self.vectors):
                 f.write(json.dumps({**ch.as_dict(), "vector": vec}) + "\n")
 
     @classmethod
-    def load(cls, path: str) -> "Corpus":
+    def load(cls, path: str, backend: str = "jsonl") -> "Corpus":
+        """Load the corpus persisted under ``path`` (see :meth:`save`)."""
+        if backend == "duckdb":
+            from .duckdb_store import load as _load_db
+            return _load_db(path)
         c = cls()
         fp = os.path.join(path, "corpus.jsonl")
         if not os.path.exists(fp):
@@ -124,6 +136,7 @@ class Corpus:
         c.add(chunks, None)
         c.vectors = vecs  # restore vectors positionally
         return c
+
 
 
 # Backwards-compatible thin alias for the phase-0 placeholder name.

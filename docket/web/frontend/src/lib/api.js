@@ -68,10 +68,19 @@ export const api = {
 	// Mint an empty Chat session (T21); the first turn names it.
 	createChat: () => postJSON('/api/chats', {}),
 
-	// --- settings write path (T01) + BYOK keys (T02) ---
-	updateConfig: (updates) => patchJSON('/api/config', { updates }),
-	// value null/'' clears the key; the server never echoes the secret back.
-	setKey: (provider, value) => postJSON('/api/config/keys', { provider, value }),
+	// --- engine profile surface (mettle /engine/*; `available:false` when absent) ---
+	// The SPA never talks to the engine directly — the server proxies it and holds
+	// the bearer, so no CORS / secret exposure (see web/app.py).
+	engine: () => getJSON('/api/engine'),
+	engineProfile: (name) => sendJSON('/api/engine/profile', 'PUT', { name }),
+	// Live profile-switch progress: replayed SSE (last 100 events on connect).
+	// Returns a cancel fn; onEvent fires per SSE event (JSON data payloads).
+	engineEvents(onEvent, onError) {
+		const es = new EventSource('/api/engine/events');
+		es.onmessage = (e) => { try { onEvent(JSON.parse(e.data)); } catch { onEvent(e.data); } };
+		es.onerror = () => onError?.();
+		return () => es.close();
+	},
 
 	// Live answer over SSE (T07). With `sessionId` (T21) the question joins that
 	// Chat and prior turns are threaded server-side. Calls onStep for each

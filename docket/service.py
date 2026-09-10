@@ -12,6 +12,7 @@ from .agent.trace import ChatStore, StepSink, TraceCollector, TraceStore
 from .config import Settings, load_settings
 from .ingest.embed import embed_texts, embeddings_available
 from .ingest.index import Corpus
+from .providers.base import SlotUnavailable
 from .providers.router import get_provider
 from .retrieval.rerank_client import make_reranker, rerank_available
 from .retrieval.retriever import Retriever
@@ -34,7 +35,7 @@ def load_retriever(settings: Settings | None = None, *, corpus: Corpus | None = 
     cross-encoder reranker only when ``DK_RERANK_URL`` is set (otherwise the fused
     RRF order stands). Both are graceful, offline-safe degradations (T26)."""
     s = settings or load_settings()
-    corpus = corpus if corpus is not None else Corpus.load(s.index_dir)
+    corpus = corpus if corpus is not None else Corpus.load(s.index_dir, backend=s.corpus_store)
     embed_query = None
     if embeddings_available(s):
         embed_query = lambda q: embed_texts([q], settings=s)[0]  # noqa: E731
@@ -50,10 +51,10 @@ def remove_document(doc_id: str, *, settings: Settings | None = None) -> int:
     (0 if the id was not present); only rewrites the index when something changed.
     """
     s = settings or load_settings()
-    corpus = Corpus.load(s.index_dir)
+    corpus = Corpus.load(s.index_dir, backend=s.corpus_store)
     removed = corpus.remove(doc_id)
     if removed:
-        corpus.save(s.index_dir)
+        corpus.save(s.index_dir, backend=s.corpus_store)
     return removed
 
 
@@ -74,9 +75,27 @@ def ask(
     s = settings or load_settings()
     retriever = retriever if retriever is not None else load_retriever(s)
     provider = get_provider(s)
-    return answer(
-        question, retriever=retriever, provider=provider, settings=s, on_step=on_step, history=history
-    )
+    try:
+        return answer(
+            question, retriever=retriever, provider=provider, settings=s, on_step=on_step, history=history
+        )
+    except SlotUnavailable as e:
+        # The engine dropped/shrunk the requested model slot (mettle profile
+        # switch / VRAM pressure): surface the reason and offer the fix instead of
+        # a bare 500. The trace's earlier steps were already recorded by on_step.
+        detail = {
+            "reason": e.reason,
+            "missing": e.missing,
+            "profile_degraded": e.profile_degraded,
+        }
+        msg = (
+            "The requested model isn't resident on the engine — the active profile "
+            f"dropped it ({e.reason}"
+            + (f": {', '.join(e.missing)}" if e.missing else "")
+            + "). Switch the engine to a profile that includes it, then retry."
+        )
+        return Answer(question=question, answer=msg, reliability="unknown",
+                      surprisal=float("nan"), detail=detail)
 
 
 def trace_store(settings: Settings | None = None) -> TraceStore:

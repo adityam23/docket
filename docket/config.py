@@ -97,11 +97,20 @@ class Settings(BaseSettings):
     cerebras_api_key: str | None = None
     groq_api_key: str | None = None
 
+    # Bearer for the engine-management surface (/engine/*) of a LOCAL backend.
+    # Set only when the engine enforces auth (mettle can); the /engine probe and
+    # SSE stream use it. Unset => no auth header (the default localhost dev case).
+    engine_key: str | None = None
+
     request_timeout_s: float = 120.0
 
     # Lite-profile ingest/retrieval knobs. The persisted corpus (chunks + optional
     # dense vectors) lives under index_dir; zero-config, embedded.
     index_dir: str = _DEFAULT_INDEX_DIR
+    # Corpus persistence backend. "jsonl" is the lite, zero-config store;
+    # "duckdb" is the platform SQL-backed store (chunks + vectors + lineage).
+    # Unknown values fall back to jsonl at the save/load seam.
+    corpus_store: str = "jsonl"
     chunk_words: int = 220        # target words per chunk
     chunk_overlap: int = 40       # word overlap between adjacent chunks
     retrieval_k: int = 20         # candidates pulled before rerank

@@ -17,6 +17,7 @@ from .chunk import Chunk, chunk_pages
 from .embed import embed_texts, embeddings_available
 from .index import Corpus
 from .ocr import pdf_to_pages
+from .metadata import extract_filing_metadata
 
 # Progress hook: on_event(doc_id, stage, info). Stages are the pipeline steps a
 # document moves through — the web ingest-job runner subscribes to render live
@@ -78,12 +79,15 @@ def ingest_paths(
         pages = pdf_to_pages(path)
 
         emit(doc_id, "chunk", pages=len(pages))
+        src = source_of(path) if source_of else path
+        meta = extract_filing_metadata(doc_id, src)
         chunks: list[Chunk] = chunk_pages(
             pages,
             doc_id=doc_id,
-            source=source_of(path) if source_of else path,
+            source=src,
             words=s.chunk_words,
             overlap=s.chunk_overlap,
+            **meta,
         )
         if not chunks:
             emit(doc_id, "skipped", reason="no extractable text")
@@ -113,7 +117,7 @@ def ingest_folder(folder: str, *, settings: Settings | None = None) -> Corpus:
         for f in files
         if f.lower().endswith(".pdf")
     )
-    corpus = Corpus.load(s.index_dir)  # incremental: extend an existing index
+    corpus = Corpus.load(s.index_dir, backend=s.corpus_store)  # incremental: extend an existing index
     ingest_paths(pdfs, settings=s, corpus=corpus)
-    corpus.save(s.index_dir)
+    corpus.save(s.index_dir, backend=s.corpus_store)
     return corpus

@@ -1,14 +1,15 @@
 """ONE OpenAI-/v1 client, parameterised by base_url / api_key / model — reused
-for every backend (local llama-server / Ollama, plus Cerebras and
+for every backend (local llama-server / Ollama / mettle, plus Cerebras and
 Groq). One concept, one implementation (see CLAUDE.md 'Reusability')."""
 
 from __future__ import annotations
 
 import re
+from typing import Callable
 
 import httpx
 
-from .base import Capability, ChatResult
+from .base import Capability, ChatResult, SlotUnavailable
 
 # Control/NUL bytes (keep \t \n \r) — PDF text extraction (pypdf) leaves stray
 # NULs in real filings, and the backend rejects them ("nul byte found in provided
@@ -34,6 +35,27 @@ def _extract_logprobs(choice: dict) -> list[float] | None:
     return out or None
 
 
+def _raise_on_slot_unavailable(r: httpx.Response) -> None:
+    """A structured 503 from the engine: a model slot was dropped/shrunk by the
+    active profile → raise ``SlotUnavailable`` so callers surface the reason and
+    offer a profile switch (mettle consumer; see docket/engine.py). Any other
+    error is left for ``raise_for_status``."""
+    # `getattr` so tests that fake a bare response-like object (with `.json()`
+    # but no `.status_code`) don't trip here; a real httpx.Response always has it.
+    if getattr(r, "status_code", None) != 503:
+        return
+    try:
+        err = r.json().get("error", {})
+    except ValueError:
+        return
+    if isinstance(err, dict) and err.get("code") == "slot_unavailable":
+        raise SlotUnavailable(
+            reason=str(err.get("reason", "vram")),
+            missing=list(err.get("missing") or []),
+            profile_degraded=bool(err.get("profile_degraded", False)),
+        )
+
+
 class OpenAICompatProvider:
     def __init__(
         self,
@@ -48,6 +70,7 @@ class OpenAICompatProvider:
         rerank_model: str | None = None,
         timeout_s: float = 120.0,
         capabilities: Capability | None = None,
+        resolve_model: Callable[[str], str] | None = None,
     ) -> None:
         self.name = name
         self.capabilities = capabilities or (Capability.CHAT | Capability.LOGPROBS)
@@ -57,6 +80,7 @@ class OpenAICompatProvider:
         self._embed_model = embed_model
         self._rerank_url = (rerank_url or "").rstrip("/") or None
         self._rerank_model = rerank_model
+        self._resolve = resolve_model or (lambda m: m)
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
         self._client = httpx.Client(timeout=timeout_s, headers=headers)
         if self._embed_url:
@@ -73,7 +97,8 @@ class OpenAICompatProvider:
         return {"base_url": self._base, "models": ids}
 
     def chat(self, messages: list[dict], **kw) -> ChatResult:
-        body: dict = {"model": self._chat_model, "messages": messages, "stream": False}
+        body: dict = {"model": self._resolve(self._chat_model), "messages": messages,
+                      "stream": False}
         # Request per-token logprobs by default so the Tier-1 trust layer has a
         # real signal to score (feeds trust/reliability). Backends that ignore
         # the flag simply return no `logprobs` block and we degrade to unknown.
@@ -81,6 +106,7 @@ class OpenAICompatProvider:
             body.setdefault("logprobs", True)
         body.update(kw)
         r = self._client.post(f"{self._base}/chat/completions", json=body)
+        _raise_on_slot_unavailable(r)
         r.raise_for_status()
         data = r.json()
         choice = data["choices"][0]
@@ -95,8 +121,10 @@ class OpenAICompatProvider:
             )
         r = self._client.post(
             f"{self._embed_url}/embeddings",
-            json={"model": self._embed_model, "input": [_sanitize(t) for t in texts]},
+            json={"model": self._resolve(self._embed_model),
+                  "input": [_sanitize(t) for t in texts]},
         )
+        _raise_on_slot_unavailable(r)
         r.raise_for_status()
         return [row["embedding"] for row in r.json()["data"]]
 
@@ -119,9 +147,10 @@ class OpenAICompatProvider:
             return []
         r = self._client.post(
             f"{self._rerank_url}/rerank",
-            json={"model": self._rerank_model, "query": _sanitize(query),
+            json={"model": self._resolve(self._rerank_model), "query": _sanitize(query),
                   "documents": [_sanitize(d) for d in documents]},
         )
+        _raise_on_slot_unavailable(r)
         r.raise_for_status()
         scores = [0.0] * len(documents)
         for row in r.json().get("results", []):

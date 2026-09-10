@@ -11,8 +11,9 @@
 	import { onMount } from 'svelte';
 	import { api } from '$lib/api.js';
 	import { when } from '$lib/format.js';
-	import Chip from '$lib/components/Chip.svelte';
 	import Icon from '$lib/components/Icon.svelte';
+	import Chip from '$lib/components/Chip.svelte';
+	import EnginePanel from '$lib/components/EnginePanel.svelte';
 	import Pivots from '$lib/components/Pivots.svelte';
 	import Timeline from '$lib/components/Timeline.svelte';
 
@@ -105,7 +106,8 @@
 	);
 	let tabs = $derived([
 		{ id: 'pipeline', label: 'pipeline' },
-		{ id: 'traces', label: 'traces', badge: (traces?.length ?? 0) + (chats?.length ?? 0) || undefined }
+		{ id: 'traces', label: 'traces', badge: (traces?.length ?? 0) + (chats?.length ?? 0) || undefined },
+		{ id: 'engine', label: 'engine' }
 	]);
 </script>
 
@@ -141,7 +143,9 @@
 	<div class="banner bad"><Icon name="alert" size={16} /> {error}</div>
 {/if}
 
-{#if tab === 'pipeline'}
+{#if tab === 'engine'}
+	<EnginePanel />
+{:else if tab === 'pipeline'}
 	{#if pipeline}
 		<!-- Real pipeline metrics render here once the backend exposes them. -->
 		<div class="panel panel-pad">

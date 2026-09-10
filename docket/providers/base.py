@@ -25,6 +25,26 @@ class ChatResult:
     raw: dict | None = None
 
 
+class SlotUnavailable(Exception):
+    """A requested model slot is not resident — the engine's active profile
+    dropped or shrank it (``slot_unavailable`` 503). Carries the structured
+    payload so callers surface the reason and offer a profile switch, instead of
+    a bare HTTP error. See ``docket/engine.py`` (mettle `/engine/*` consumer)."""
+    def __init__(
+        self,
+        *,
+        reason: str = "vram",
+        missing: list[str] | None = None,
+        profile_degraded: bool = False,
+        status_code: int = 503,
+    ) -> None:
+        self.reason = reason
+        self.missing = missing or []
+        self.profile_degraded = profile_degraded
+        self.status_code = status_code
+        super().__init__(f"slot unavailable ({reason}): {', '.join(self.missing)}")
+
+
 @runtime_checkable
 class Provider(Protocol):
     name: str

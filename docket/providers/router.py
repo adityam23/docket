@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from ..config import Provider as P
 from ..config import Settings
+from ..engine import resolve_model
 from .base import Provider
 from .openai_compat import OpenAICompatProvider
 from .presets import CEREBRAS, GROQ
@@ -21,6 +22,7 @@ def get_provider(settings: Settings) -> Provider:
             rerank_url=settings.rerank_url,
             rerank_model=settings.rerank_model,
             timeout_s=settings.request_timeout_s,
+            resolve_model=lambda m: resolve_model(settings, m),
         )
     if settings.provider == P.cerebras:
         return OpenAICompatProvider(

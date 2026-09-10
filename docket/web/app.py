@@ -24,6 +24,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from ..agent.trace import compact_step, hit_view
+from ..config import load_settings
+from ..engine import engine_activate, engine_events_stream, engine_view
 from ..config_write import (
     ConfigWriteError,
     clear_secret,
@@ -78,6 +80,10 @@ class ConfigUpdate(BaseModel):
 class KeyUpdate(BaseModel):
     provider: str            # "cerebras" | "groq" (config_write.SECRET_ENV)
     value: str | None = None  # set when present; clear when null/empty
+
+
+class EngineProfileRequest(BaseModel):
+    name: str
 
 
 def _answer_payload(question: str, *, session_id: str | None = None, on_step=None) -> tuple[dict, dict]:
@@ -314,6 +320,37 @@ def api_config_keys(req: KeyUpdate) -> dict:
     except ConfigWriteError as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
     return {"api_keys": secret_status()}
+
+
+# --- Engine control (mettle `/engine/*` consumer) ----------------------------
+
+
+@app.get("/api/engine")
+def api_engine() -> dict:
+    """The SPA's window onto the engine's profile surface: definitions + active
+    profile + per-slot status + device VRAM, or ``{"available": False}`` when the
+    backend isn't a mettle-class engine (the feature is then hidden)."""
+    return engine_view(load_settings())
+
+
+@app.put("/api/engine/profile")
+def api_engine_profile(req: EngineProfileRequest) -> dict:
+    """Switch the engine's active profile. 202 = accepted (progress streams on
+    ``/api/engine/events``); the engine maps the outcome to a profile event."""
+    status, body = engine_activate(load_settings(), req.name)
+    if status == 202:
+        return {"accepted": True, **body}
+    if status in (404, 409, 503):
+        raise HTTPException(status_code=status, detail=body.get("error") or body)
+    raise HTTPException(status_code=502, detail=body.get("error") or f"activation failed ({status})")
+
+
+@app.get("/api/engine/events")
+def api_engine_events() -> StreamingResponse:
+    """Proxy the engine's SSE event stream (replays the last 100 on connect) to
+    the SPA, which drives live activation progress. The SPA never talks to the
+    engine or holds its bearer token."""
+    return StreamingResponse(engine_events_stream(load_settings()), media_type="text/event-stream")
 
 
 @app.post("/api/ingest")

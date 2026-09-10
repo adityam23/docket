@@ -194,10 +194,10 @@ class IngestJobs:
                     dp.error = str(info.get("reason", ""))
 
         try:
-            corpus = Corpus.load(s.index_dir)          # incremental extend
+            corpus = Corpus.load(s.index_dir, backend=s.corpus_store)          # incremental extend
             ingest_paths(pdfs, settings=s, corpus=corpus,
                          on_event=on_event, source_of=source_of)
-            corpus.save(s.index_dir)
+            corpus.save(s.index_dir, backend=s.corpus_store)
             with self._lock:
                 job.status = "done"
         except Exception as e:  # noqa: BLE001 - surface failure as job state

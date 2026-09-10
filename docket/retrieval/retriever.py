@@ -169,6 +169,10 @@ class Retriever:
                     "page": ch.page,
                     "text": ch.text,
                     "source": ch.source,
+                    "form_type": ch.form_type,
+                    "company": ch.company,
+                    "ticker": ch.ticker,
+                    "fiscal_period": ch.fiscal_period,
                     "score": round(scores[cid], 6),
                     "rank": rank,
                 }
