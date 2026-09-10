@@ -139,7 +139,41 @@ def main() -> int:
     else:
         failures.append(f"3b: no recovery after crash; state={sup2.view()}")
         print("[FAIL] 3b:", sup2.view())
+    # 4. stop() must take the whole engine process group with it — an orphaned
+    # mettled holds its weights in VRAM and OOMs the next launch.
+    pid_before = sup2.view()["pid"]
+    alive_before = pid_before is not None and os.path.exists(f"/proc/{pid_before}")
     sup2.stop()
+    time.sleep(1.0)
+    still_alive = pid_before is not None and os.path.exists(f"/proc/{pid_before}")
+    if alive_before and not still_alive:
+        print(f"[ok] 4: stop() killed the spawned engine (pid {pid_before})")
+    else:
+        failures.append(f"4: engine still alive after stop() (pid={pid_before})")
+        print("[FAIL] 4: orphaned engine after stop")
+
+    port3 = free_port()
+    slow = os.path.join(tempfile.mkdtemp(), "slow-mettled")
+    with open(slow, "w") as f:
+        f.write("#!/bin/sh\nsleep 60\n")  # alive, never answers the probe
+    os.chmod(slow, 0o755)
+    sup3 = EngineSupervisor(Settings(backend_url=f"http://127.0.0.1:{port3}/v1", engine_binary=slow))
+    sup3.ensure()
+    time.sleep(4.0)
+    v = sup3.view()
+    if v["state"] == "starting" and v["attempts"] == 1:
+        print("[ok] 5: alive-but-slow child stays patient (attempts stays 1)")
+    else:
+        failures.append(f"5: budget consumed during patient start: {v}")
+        print("[FAIL] 5:", v)
+    sup3.stop()
+    time.sleep(1.0)
+    reaped = v["pid"] is None or not os.path.exists(f"/proc/{v['pid']}")
+    if reaped:
+        print("[ok] 5b: stop() reaped the slow engine")
+    else:
+        failures.append(f"5b: slow engine orphaned (pid={v['pid']})")
+        print("[FAIL] 5b: slow engine still alive")
 
     print()
     if failures:

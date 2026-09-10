@@ -24,6 +24,7 @@ stripping the trailing ``/v1`` (see :func:`_engine_base`).
 """
 
 import os
+import signal
 import subprocess
 import threading
 import time
@@ -184,6 +185,7 @@ class EngineSupervisor:
         self.state = "offline"
         self.attempts = 0
         self.pid: int | None = None
+        self._proc: subprocess.Popen | None = None
 
     # -- probe --------------------------------------------------------------
 
@@ -208,9 +210,13 @@ class EngineSupervisor:
         env = dict(os.environ)
         if self._settings.mettle_config:
             env["METTLE_CONFIG"] = self._settings.mettle_config
-        proc = subprocess.Popen([binary], env=env, cwd=os.path.dirname(binary) or None)
+        proc = subprocess.Popen(
+            [binary], env=env, cwd=os.path.dirname(binary) or None,
+            start_new_session=True,  # own process group: stop() can kill the whole tree
+        )
         with self._lock:
             self.pid = proc.pid
+            self._proc = proc
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -229,10 +235,29 @@ class EngineSupervisor:
         """Manual restart (the ``failed`` state's only exit). Resets the budget
         and kicks the loop; the next probe/spawn cycle decides the state."""
         self.attempts = 0
-        self._wake.set()
 
     def stop(self) -> None:
+        """Stop supervision AND the spawned engine. The engine was spawned in
+        its own session, so the whole tree (mettled + any loader children) is
+        one process group: SIGTERM it, then SIGKILL whatever survived — an
+        orphaned mettled holds its weights in VRAM and OOMs the next launch."""
         self._stop = True
+        self._wake.set()
+        proc = self._proc
+        if proc is None or proc.poll() is not None:
+            return
+        try:
+            pgid = os.getpgid(proc.pid)
+            os.killpg(pgid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+        try:
+            proc.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
         self._wake.set()
 
     def view(self) -> dict:
@@ -277,9 +302,16 @@ class EngineSupervisor:
         self._wake.clear()
 
     def _bring_up(self) -> None:
-        """Get the engine answering again: spawn (when configured) + probe
-        until ready, with a bounded restart budget. ``failed`` is terminal for
-        the loop until :meth:`restart` resets it."""
+        """Get the engine answering again: spawn + probe until ready, with a
+        bounded restart budget on genuine crashes. ``failed`` is terminal for
+        the loop until :meth:`restart` resets it.
+
+        While the spawned child is ALIVE and merely not answering yet, we keep
+        waiting without consuming the budget — a first run legitimately spends
+        minutes downloading GB-scale weights (mettle's own first-run download),
+        and respawning over it would double-book VRAM. An attempt is counted
+        only when the child DIES: it is reaped, we back off, and the next loop
+        pass spawns a fresh one."""
         with self._lock:
             if self.attempts >= len(self._BACKOFF_S):
                 self.state = "failed"
@@ -293,17 +325,22 @@ class EngineSupervisor:
         self.attempts += 1
         self._spawn()
 
-        # Health-probe until ready (mettle loads models before answering) or a
-        # bounded wait elapses — then the backoff sleep before the next try.
-        deadline = time.monotonic() + 30.0
-        while time.monotonic() < deadline and not self._stop:
+        # Probe until ready; stay patient while the child lives and keeps
+        # starting up (weights download / model load), bail quickly on death.
+        while not self._stop:
             if self._probing():
                 with self._lock:
                     self.state = "available"
                     self.attempts = 0
                 return
+            proc = self._proc
+            if proc is None or proc.poll() is not None:
+                break  # child died before answering → genuine attempt failure
             time.sleep(0.5)
+            if self._stop:
+                return
 
+        # Child dead: reap it, back off, retry on the next loop pass.
         self._wake.wait(timeout=self._BACKOFF_S[min(self.attempts, len(self._BACKOFF_S)) - 1])
         self._wake.clear()
 
