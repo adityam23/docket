@@ -1,6 +1,7 @@
-"""ONE OpenAI-/v1 client, parameterised by base_url / api_key / model — reused
-for every backend (local llama-server / Ollama / mettle, plus Cerebras and
-Groq). One concept, one implementation (see CLAUDE.md 'Reusability')."""
+"""THE OpenAI-/v1 client, pointed at mettle — the only supported engine. Chat,
+embeddings, rerank and the collection surface (search / document ingest /
+collection lifecycle) all ride this one base URL; parameterise, never fork
+(CLAUDE.md 'Reusability')."""
 
 from __future__ import annotations
 
@@ -37,8 +38,8 @@ def _extract_logprobs(choice: dict) -> list[float] | None:
 
 def _raise_on_slot_unavailable(r: httpx.Response) -> None:
     """A structured 503 from the engine: a model slot was dropped/shrunk by the
-    active profile → raise ``SlotUnavailable`` so callers surface the reason and
-    offer a profile switch (mettle consumer; see docket/engine.py). Any other
+    active profile (VRAM pressure / profile switch). Raise the structured
+    exception the service layer turns into a helpful answer; any other status
     error is left for ``raise_for_status``."""
     # `getattr` so tests that fake a bare response-like object (with `.json()`
     # but no `.status_code`) don't trip here; a real httpx.Response always has it.
@@ -50,9 +51,9 @@ def _raise_on_slot_unavailable(r: httpx.Response) -> None:
         return
     if isinstance(err, dict) and err.get("code") == "slot_unavailable":
         raise SlotUnavailable(
-            reason=str(err.get("reason", "vram")),
-            missing=list(err.get("missing") or []),
-            profile_degraded=bool(err.get("profile_degraded", False)),
+            reason=err.get("reason", "unknown"),
+            missing=err.get("missing") or [],
+            profile_degraded=bool(err.get("profile_degraded")),
         )
 
 
@@ -64,29 +65,25 @@ class OpenAICompatProvider:
         base_url: str,
         chat_model: str,
         api_key: str | None = None,
-        embed_url: str | None = None,
         embed_model: str | None = None,
-        rerank_url: str | None = None,
         rerank_model: str | None = None,
         timeout_s: float = 120.0,
         capabilities: Capability | None = None,
         resolve_model: Callable[[str], str] | None = None,
     ) -> None:
         self.name = name
-        self.capabilities = capabilities or (Capability.CHAT | Capability.LOGPROBS)
+        # mettle serves every capability on the ONE base; there is no fallback
+        # backend to degrade to (cutover contract: loud failure, not silence).
+        self.capabilities = capabilities or (
+            Capability.CHAT | Capability.LOGPROBS | Capability.EMBED | Capability.RERANK
+        )
         self._base = base_url.rstrip("/")
         self._chat_model = chat_model
-        self._embed_url = (embed_url or "").rstrip("/") or None
         self._embed_model = embed_model
-        self._rerank_url = (rerank_url or "").rstrip("/") or None
         self._rerank_model = rerank_model
         self._resolve = resolve_model or (lambda m: m)
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
         self._client = httpx.Client(timeout=timeout_s, headers=headers)
-        if self._embed_url:
-            self.capabilities |= Capability.EMBED
-        if self._rerank_url:
-            self.capabilities |= Capability.RERANK
 
     def health(self) -> dict:
         r = self._client.get(f"{self._base}/models")
@@ -114,13 +111,8 @@ class OpenAICompatProvider:
         return ChatResult(text=text, logprobs=_extract_logprobs(choice), raw=data)
 
     def embed(self, texts: list[str]) -> list[list[float]]:
-        if not self._embed_url:
-            raise RuntimeError(
-                "embeddings unconfigured — set DK_EMBED_URL to a dedicated "
-                "`llama-server --embeddings` endpoint"
-            )
         r = self._client.post(
-            f"{self._embed_url}/embeddings",
+            f"{self._base}/embeddings",
             json={"model": self._resolve(self._embed_model),
                   "input": [_sanitize(t) for t in texts]},
         )
@@ -129,8 +121,7 @@ class OpenAICompatProvider:
         return [row["embedding"] for row in r.json()["data"]]
 
     def rerank(self, query: str, documents: list[str]) -> list[float]:
-        """Score each document against the query via ``/v1/rerank`` (Cohere shape:
-        Cerebras/Groq don't serve it — this is the all-in-one local backend path).
+        """Score each document against the query via ``/v1/rerank`` (Cohere shape).
 
         The endpoint returns results **sorted by score** carrying the ``index``
         into the request; the retriever's ``Reranker`` seam expects one score per
@@ -138,15 +129,12 @@ class OpenAICompatProvider:
         to its ``index``. Only rank order is used downstream, so the raw
         (query-dependent, uncalibrated) score is fine — no normalisation. Empty
         input short-circuits (the backend returns ``results: []`` for it anyway)."""
-        if not self._rerank_url:
-            raise RuntimeError(
-                "rerank unconfigured — set DK_RERANK_URL to a backend serving "
-                "`/v1/rerank`"
-            )
+        if Capability.RERANK not in self.capabilities:
+            raise RuntimeError("rerank unconfigured on this engine")
         if not documents:
             return []
         r = self._client.post(
-            f"{self._rerank_url}/rerank",
+            f"{self._base}/rerank",
             json={"model": self._resolve(self._rerank_model), "query": _sanitize(query),
                   "documents": [_sanitize(d) for d in documents]},
         )
@@ -158,3 +146,69 @@ class OpenAICompatProvider:
             if isinstance(idx, int) and 0 <= idx < len(documents):
                 scores[idx] = row.get("relevance_score", 0.0)
         return scores
+
+    # --- collection surface (mettle /v1/collections; retrieval lives engine-side)
+
+    def ensure_collection(self, collection: str) -> None:
+        """Create the collection if absent. 409 (already exists) is success —
+        the collection's embedder/dim are the engine's defaults, not ours."""
+        r = self._client.post(
+            f"{self._base}/collections",
+            json={"name": collection, "embedding_model": "default"},
+        )
+        if r.status_code == 409:
+            return
+        r.raise_for_status()
+
+    def delete_collection(self, collection: str) -> bool:
+        r = self._client.delete(f"{self._base}/collections/{collection}")
+        if r.status_code == 404:
+            return False
+        r.raise_for_status()
+        return True
+
+    def post_document(
+        self, collection: str, doc_id: str, text: str, metadata: dict[str, str] | None = None
+    ) -> list[str]:
+        """POST one docket chunk as an engine document. Returns the engine's
+        chunk ids (one per posted document under the engine's own chunker)."""
+        r = self._client.post(
+            f"{self._base}/collections/{collection}/documents",
+            json={"id": doc_id, "content": _sanitize(text), "metadata": metadata or {}},
+        )
+        _raise_on_slot_unavailable(r)
+        r.raise_for_status()
+        return r.json().get("chunk_ids", [])
+
+    def delete_document(self, collection: str, doc_id: str) -> bool:
+        r = self._client.delete(f"{self._base}/collections/{collection}/documents/{doc_id}")
+        if r.status_code == 404:
+            return False
+        r.raise_for_status()
+        return True
+
+    def collection_search(
+        self,
+        collection: str,
+        query: str,
+        *,
+        mode: str = "hybrid",
+        k: int = 10,
+        allowlist: list[str] | None = None,
+    ) -> list[dict]:
+        """Search a collection engine-side. ``mode`` is dense | keyword | hybrid —
+        anything else is a client bug and raises LOUDLY before the wire (no
+        silent fallback to another mode: a wrong-number answer is worse than an
+        error). Response rows are ``ScoredChunk``: chunk_id, document_id, text,
+        score (desc), optional source_span."""
+        if mode not in ("dense", "keyword", "hybrid"):
+            raise ValueError(f"unknown search mode: {mode!r}")
+        body: dict = {"query": query, "k": k, "mode": mode}
+        if allowlist:
+            body["allowlist"] = allowlist
+        r = self._client.post(
+            f"{self._base}/collections/{collection}/search", json=body
+        )
+        _raise_on_slot_unavailable(r)
+        r.raise_for_status()
+        return r.json()

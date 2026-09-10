@@ -65,26 +65,21 @@ def test_resilient_provider_delegates_and_retries():
         def chat(self, *a, **kw):
             self.calls += 1
             if self.calls == 1:
-                raise ConnectionError("backend went away")
+                import httpx
+                raise httpx.ConnectError("engine went away")
             return "ok"
 
     inner = _Flaky()
     wrapped = run_full._ResilientProvider(inner, base_url="http://127.0.0.1:11434/v1")
     assert wrapped.name == "flaky"  # transparent delegation of non-chat attrs
 
-    # _resilient (shared with the sweep) waits on the backend + backs off between
-    # tries; patch both so the retry doesn't block on a real socket or sleep.
-    import sys
+    # _resilient backs off between tries; patch sleep so no wall time is spent.
     import time as _time
 
-    sys.path.insert(0, str(_RUN_FULL.parent))
-    import sweep_recall
-
-    sweep_recall._wait_backend = lambda *a, **k: True
     orig_sleep = _time.sleep
     _time.sleep = lambda *a, **k: None
     try:
-        # first call raises → _resilient waits + retries → second call succeeds
+        # first call raises → _resilient retries → second call succeeds
         assert wrapped.chat([{"role": "user", "content": "hi"}]) == "ok"
     finally:
         _time.sleep = orig_sleep

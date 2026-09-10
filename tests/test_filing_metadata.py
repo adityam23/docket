@@ -39,53 +39,45 @@ def test_chunk_threads_metadata():
     )
 
 
-def test_metadata_roundtrip_jsonl_and_duckdb(tmp_path):
-    try:
-        import duckdb  # noqa: F401
-    except ImportError:
-        backends = ["jsonl"]
-    else:
-        backends = ["jsonl", "duckdb"]
+def test_metadata_roundtrip(tmp_path):
     c = Corpus()
-    c.add(
-        chunk_text("revenue grew", doc_id="3M_2018_10K",
-                   form_type="10-K", company="3M", fiscal_period="2018"),
-        [[1.0]],
-    )
-    for backend in backends:
-        c.save(str(tmp_path / backend), backend=backend)
-        loaded = Corpus.load(str(tmp_path / backend), backend=backend)
-        ch = loaded.chunks[0]
-        assert ch.form_type == "10-K" and ch.company == "3M"
-        assert ch.fiscal_period == "2018"
+    c.add(chunk_text("revenue grew", doc_id="3M_2018_10K",
+                     form_type="10-K", company="3M", fiscal_period="2018"))
+    c.save(str(tmp_path))
+    loaded = Corpus.load(str(tmp_path))
+    ch = loaded.chunks[0]
+    assert ch.form_type == "10-K" and ch.company == "3M"
+    assert ch.fiscal_period == "2018"
 
 
-def test_hit_and_view_carry_metadata():
+def test_hit_and_view_carry_metadata(monkeypatch):
     from docket.agent.trace import hit_view
     from docket.retrieval.retriever import Retriever
 
+    chunks = chunk_text("revenue grew", doc_id="3M_2018_10K",
+                        form_type="10-K", company="3M")
+
+    class _FakeEngine:
+        def collection_search(self, collection, query, *, mode="hybrid", k=10, allowlist=None):
+            return [{"chunk_id": ch.chunk_id, "document_id": ch.chunk_id,
+                     "text": ch.text, "score": 1.0} for ch in chunks][:k]
+
     c = Corpus()
-    c.add(
-        chunk_text("capital expenditure increased", doc_id="3M_2018_10K",
-                   form_type="10-K", company="3M"),
-        None,
-    )
-    hits = Retriever(c).retrieve("capital expenditure", k=1)
+    c.add(chunks)
+    hits = Retriever(_FakeEngine(), c, collection="docket").retrieve("revenue", k=3)
     assert hits and hits[0]["form_type"] == "10-K"
     view = hit_view(hits[0])
     assert view["form_type"] == "10-K" and view["company"] == "3M"
 
 
-def test_corpus_stats_surfaces_metadata():
+def test_corpus_stats_surfaces_metadata(tmp_path):
     from docket.config import Settings
     from docket.web.observability import corpus_stats
 
     c = Corpus()
-    c.add(
-        chunk_text("revenue grew", doc_id="3M_2018_10K",
-                   form_type="10-K", company="3M"),
-        None,
-    )
-    stats = corpus_stats(Settings(index_dir="/tmp/unused"), corpus=c)
+    c.add(chunk_text("revenue grew", doc_id="3M_2018_10K",
+                     form_type="10-K", company="3M"))
+    c.save(str(tmp_path))
+    stats = corpus_stats(Settings(index_dir=str(tmp_path)))
     doc = stats["documents"][0]
     assert doc["form_type"] == "10-K" and doc["company"] == "3M"

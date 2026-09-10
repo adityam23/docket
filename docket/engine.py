@@ -8,22 +8,30 @@ edit engine code (the boundary): feature requests for the engine are written as
 contract docs into ``../mettle/agent-docs/``, never code changes here.
 
 Capability-detect once: a backend that answers ``GET /engine/profiles`` is a
-mettle-class engine with a profile surface; anything else (llama-server, Ollama,
-Cerebras, Groq) 404s it and the whole feature is hidden — the same pattern as
-``Capability`` in ``providers/base.py``.
+mettle-class engine with a profile surface; anything else 404s it and the whole
+feature is hidden — the same pattern as ``Capability`` in ``providers/base.py``.
+
+**Supervision (§3):** docket's backend owns mettled's lifecycle. On startup the
+:class:`EngineSupervisor` probes ``/engine/status``; if it doesn't answer it
+spawns the configured ``mettled`` binary, health-probes until ready, and
+restarts on crash with exponential backoff (1→2→4→8→16 s, 5 attempts) before
+declaring a hard ``failed`` state (manual restart via :meth:`EngineSupervisor.restart`).
+Binary path unset ⇒ probe-only, never spawn. Engine code is never imported.
 
 The ``engine`` surface is mounted at the server ROOT (``/engine/*``), NOT under
 the OpenAI ``/v1`` base that ``backend_url`` points at — so the base is derived by
 stripping the trailing ``/v1`` (see :func:`_engine_base`).
 """
 
-from __future__ import annotations
-
+import os
+import subprocess
+import threading
+import time
 from typing import Iterator
 
 import httpx
 
-from .config import Settings
+from .config import Settings, load_settings
 
 _PROBE_TTL = 5.0  # seconds; a positive probe is cached so role: resolution doesn't hammer the engine
 _positive_cache: dict[str, float] = {}
@@ -154,3 +162,160 @@ def resolve_model(settings: Settings, model_id: str) -> str:
     # slots without a priority rank below all priority-bearing ones.
     role_slots.sort(key=lambda s: (s.get("priority") is None, -(s.get("priority") or 0)))
     return role_slots[0].get("id") or model_id
+
+
+class EngineSupervisor:
+    """Spawn + health-probe + crash-restart mettled (cutover contract §3).
+
+    States: ``offline`` (not answering, not supervised), ``starting`` (spawned,
+    probing), ``available`` (probe answers), ``failed`` (restart budget
+    exhausted — manual restart required). Binary path unset ⇒ probe-only:
+    states move between ``offline`` and ``available``, never spawn.
+    """
+
+    _BACKOFF_S = (1.0, 2.0, 4.0, 8.0, 16.0)  # restart budget: 5 attempts
+
+    def __init__(self, settings: Settings) -> None:
+        self._settings = settings
+        self._lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+        self._wake = threading.Event()   # nudges the loop: restart() or stop
+        self._stop = False
+        self.state = "offline"
+        self.attempts = 0
+        self.pid: int | None = None
+
+    # -- probe --------------------------------------------------------------
+
+    def _probing(self) -> bool:
+        """True when ``/engine/status`` answers 200."""
+        try:
+            r = httpx.get(
+                _engine_base(self._settings) + "/engine/status",
+                headers=_headers(self._settings), timeout=2.0,
+            )
+            return r.status_code == 200
+        except httpx.HTTPError:
+            return False
+
+    # -- spawn --------------------------------------------------------------
+
+    def _spawn(self) -> None:
+        """Start mettled. The port/config come from mettle's own config file
+        (docket never pushes engine config, §4); METTLE_CONFIG is honoured when
+        the operator set one. Never imports engine code."""
+        binary = self._settings.engine_binary
+        env = dict(os.environ)
+        if self._settings.mettle_config:
+            env["METTLE_CONFIG"] = self._settings.mettle_config
+        proc = subprocess.Popen([binary], env=env, cwd=os.path.dirname(binary) or None)
+        with self._lock:
+            self.pid = proc.pid
+
+    # -- lifecycle ----------------------------------------------------------
+
+    def ensure(self) -> None:
+        """Idempotent: start the supervision loop (web-app startup, CLI entry)."""
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return
+            self._stop = False
+            self._thread = threading.Thread(
+                target=self._loop, name="engine-supervisor", daemon=True
+            )
+            self._thread.start()
+
+    def restart(self) -> None:
+        """Manual restart (the ``failed`` state's only exit). Resets the budget
+        and kicks the loop; the next probe/spawn cycle decides the state."""
+        self.attempts = 0
+        self._wake.set()
+
+    def stop(self) -> None:
+        self._stop = True
+        self._wake.set()
+
+    def view(self) -> dict:
+        """Supervision state for the SPA: honest ``offline/starting/...``."""
+        with self._lock:
+            return {
+                "state": self.state,
+                "pid": self.pid,
+                "binary": self._settings.engine_binary,
+                "attempts": self.attempts,
+            }
+
+    # -- the loop -----------------------------------------------------------
+
+    def _loop(self) -> None:
+        while not self._stop:
+            if self._probing():
+                with self._lock:
+                    self.state = "available"
+                    self.attempts = 0
+                self._wait_for_death()
+            elif not self._settings.engine_binary:
+                # Probe-only: nothing to spawn or fix. An engine that stops
+                # answering goes (and stays) ``offline`` — the loud, honest
+                # state — retried on the cheap probe interval.
+                with self._lock:
+                    self.state = "offline"
+                    self.attempts = 0
+                self._wake.wait(timeout=2.0)
+                self._wake.clear()
+            else:
+                self._bring_up()
+
+
+    def _wait_for_death(self) -> None:
+        """Stay in ``available`` until the probe stops answering (crash) or the
+        operator nudges us."""
+        while not self._stop and not self._wake.is_set():
+            time.sleep(2.0)
+            if not self._probing():
+                return
+        self._wake.clear()
+
+    def _bring_up(self) -> None:
+        """Get the engine answering again: spawn (when configured) + probe
+        until ready, with a bounded restart budget. ``failed`` is terminal for
+        the loop until :meth:`restart` resets it."""
+        with self._lock:
+            if self.attempts >= len(self._BACKOFF_S):
+                self.state = "failed"
+                self._wake.clear()
+                # Sleep until nudged; the loop must not spin in failed state.
+                while not self._stop and not self._wake.is_set():
+                    self._wake.wait(timeout=5.0)
+                return
+            self.state = "starting"
+
+        self.attempts += 1
+        self._spawn()
+
+        # Health-probe until ready (mettle loads models before answering) or a
+        # bounded wait elapses — then the backoff sleep before the next try.
+        deadline = time.monotonic() + 30.0
+        while time.monotonic() < deadline and not self._stop:
+            if self._probing():
+                with self._lock:
+                    self.state = "available"
+                    self.attempts = 0
+                return
+            time.sleep(0.5)
+
+        self._wake.wait(timeout=self._BACKOFF_S[min(self.attempts, len(self._BACKOFF_S)) - 1])
+        self._wake.clear()
+
+
+_SUPERVISOR: EngineSupervisor | None = None
+_SUPERVISOR_LOCK = threading.Lock()
+
+
+def get_supervisor(settings: Settings | None = None) -> EngineSupervisor:
+    """The process-wide supervisor (one engine, one supervisor — CLAUDE.md)."""
+    global _SUPERVISOR
+    with _SUPERVISOR_LOCK:
+        if _SUPERVISOR is None:
+            _SUPERVISOR = EngineSupervisor(settings or load_settings())
+        return _SUPERVISOR

@@ -19,7 +19,7 @@
 	let saved = $state(false);
 	let saveError = $state('');
 
-	let keyInput = $state({ cerebras: '', groq: '' });
+	let keyInput = $state({ engine: '' });
 	let keyBusy = $state('');
 
 	const NUMS = ['request_timeout_s', 'chunk_words', 'chunk_overlap', 'retrieval_k', 'context_chunks', 'max_hops'];
@@ -27,11 +27,14 @@
 	function initForm() {
 		const r = cfg.retrieval;
 		form = {
-			provider: cfg.provider,
 			backend_url: cfg.backend_url,
 			chat_model: cfg.chat_model,
-			embed_url: cfg.embed.url || '',
-			embed_model: cfg.embed.model,
+			embed_model: cfg.embed_model,
+			rerank_model: cfg.rerank_model,
+			engine_binary: cfg.supervision?.engine_binary || '',
+			mettle_config: cfg.supervision?.mettle_config || '',
+			engine_collection: cfg.retrieval.engine_collection,
+			retrieval_mode: cfg.retrieval.retrieval_mode,
 			chunk_words: r.chunk_words,
 			chunk_overlap: r.chunk_overlap,
 			retrieval_k: r.retrieval_k,
@@ -39,7 +42,6 @@
 			max_hops: r.max_hops,
 			request_timeout_s: cfg.request_timeout_s
 		};
-		original = { ...form };
 	}
 
 	async function load() {
@@ -93,12 +95,12 @@
 		}
 	}
 
-	let embedEnabled = $derived(!!(form.embed_url && form.embed_url.trim()));
+	let engineReachable = $derived(!!(health && health.ok));
 </script>
 
 <h1 class="page-title">settings</h1>
 <p class="page-sub" style="margin-bottom: 8px">
-	Backend, models, embeddings and retrieval — saved to a local
+	Engine, models and retrieval — saved to a local
 	<span class="mono">.env.local</span> overlay and applied on the next request, no restart.
 </p>
 
@@ -111,26 +113,21 @@
 		<div class="banner bad" style="margin-bottom: 16px">{saveError}</div>
 	{/if}
 
-	<!-- Backend / model -->
-	<div class="list-section-title">Backend &amp; model</div>
+	<!-- Engine & model -->
+	<div class="list-section-title">Engine &amp; model</div>
 	<div class="list-menu">
 		<div class="list-row">
 			<div>
-				<div class="lr-label">Provider</div>
-				<div class="lr-hint">Where inference runs.
-					<Chip tone={health?.ok ? 'neutral' : 'bad'} dot>{health?.ok ? 'online' : 'offline'}</Chip>
+				<div class="lr-label">Engine</div>
+				<div class="lr-hint">mettle — one <span class="mono">/v1</span> base serves chat, embeddings, rerank and collections.
+					<Chip tone={health?.ok ? 'accent' : 'bad'} dot>{health?.ok ? 'online' : 'offline'}</Chip>
 				</div>
 			</div>
-			<select bind:value={form.provider} style="max-width: 320px">
-				<option value="local">local (llama-server / Ollama)</option>
-				<option value="cerebras">cerebras</option>
-				<option value="groq">groq</option>
-			</select>
 		</div>
 		<div class="list-row">
 			<div>
-				<div class="lr-label">Backend URL</div>
-				<div class="lr-hint">OpenAI-compatible <span class="mono">/v1</span> endpoint.</div>
+				<div class="lr-label">Engine URL</div>
+				<div class="lr-hint">OpenAI-compatible <span class="mono">/v1</span> base.</div>
 			</div>
 			<input type="text" bind:value={form.backend_url} spellcheck="false" style="max-width: 320px" />
 		</div>
@@ -143,18 +140,15 @@
 		</div>
 	</div>
 
-	<!-- Embeddings & chunking -->
-	<div class="list-section-title">Embeddings &amp; chunking</div>
+	<!-- Rerank, embeddings & chunking -->
+	<div class="list-section-title">Rerank, embeddings &amp; chunking</div>
 	<div class="list-menu">
 		<div class="list-row">
 			<div>
-				<div class="lr-label">Embeddings URL</div>
-				<div class="lr-hint">Blank = sparse-only (BM25).</div>
+				<div class="lr-label">Reranker</div>
+				<div class="lr-hint">Cross-encoder served at <span class="mono">/v1/rerank</span>; the reranked order is what ships.</div>
 			</div>
-			<div class="row" style="gap: 10px; max-width: 380px">
-				<Chip tone={embedEnabled ? 'accent' : 'neutral'}>{embedEnabled ? 'dense on' : 'sparse only'}</Chip>
-				<input type="text" bind:value={form.embed_url} spellcheck="false" placeholder="http://127.0.0.1:11434/v1" style="max-width: 280px" />
-			</div>
+			<input type="text" bind:value={form.rerank_model} spellcheck="false" style="max-width: 320px" />
 		</div>
 		<div class="list-row">
 			<div><div class="lr-label">Embedding model</div></div>
@@ -173,6 +167,24 @@
 	<!-- Retrieval -->
 	<div class="list-section-title">Retrieval</div>
 	<div class="list-menu">
+		<div class="list-row">
+			<div>
+				<div class="lr-label">Search mode</div>
+				<div class="lr-hint">Engine search strategy; <span class="mono">hybrid</span> unions keyword + dense.</div>
+			</div>
+			<select bind:value={form.retrieval_mode} style="max-width: 200px">
+				<option value="hybrid">hybrid</option>
+				<option value="dense">dense</option>
+				<option value="keyword">keyword</option>
+			</select>
+		</div>
+		<div class="list-row">
+			<div>
+				<div class="lr-label">Collection</div>
+				<div class="lr-hint">Engine collection filings are ingested into.</div>
+			</div>
+			<input type="text" bind:value={form.engine_collection} spellcheck="false" style="max-width: 280px" />
+		</div>
 		<div class="list-row">
 			<div><div class="lr-label">Candidates (k)</div><div class="lr-hint">Chunks pulled before ranking.</div></div>
 			<input type="number" min="1" bind:value={form.retrieval_k} style="max-width: 140px" />
@@ -199,14 +211,36 @@
 		<span class="mute2 small">Index: <span class="mono">{cfg.index_dir}</span></span>
 	</div>
 
-	<!-- API keys (BYOK) -->
-	<div class="list-section-title">Provider API keys (BYOK)</div>
+	<!-- Engine supervision -->
+	<div class="list-section-title">Engine supervision</div>
+	<div class="list-menu">
+		<div class="list-row">
+			<div>
+				<div class="lr-label">mettled binary</div>
+				<div class="lr-hint">
+					Path to the engine binary. Set: docket spawns, health-probes and crash-restarts it.
+					Blank: probe-only — an unreachable engine shows <span class="mono">offline</span> and docket features fail loudly.
+				</div>
+			</div>
+			<input type="text" bind:value={form.engine_binary} spellcheck="false" placeholder="/path/to/mettled" style="max-width: 320px" />
+		</div>
+		<div class="list-row">
+			<div>
+				<div class="lr-label">Engine config</div>
+				<div class="lr-hint">Passed to the engine as <span class="mono">METTLE_CONFIG</span> when docket spawns it. Blank = engine default.</div>
+			</div>
+			<input type="text" bind:value={form.mettle_config} spellcheck="false" style="max-width: 320px" />
+		</div>
+	</div>
+
+	<!-- Engine key -->
+	<div class="list-section-title">Engine key</div>
 	<div class="list-menu">
 		<p class="small mute2" style="margin: 0 0 6px">
 			Stored locally in <span class="mono">.env.local</span> at <span class="mono">0600</span> and never shown again.
-			Needed only for the Cerebras / Groq providers.
+			Needed only when the engine enforces auth on <span class="mono">/v1</span> / <span class="mono">/engine/*</span>.
 		</p>
-		{#each ['cerebras', 'groq'] as p}
+		{#each ['engine'] as p}
 			<div class="list-row">
 				<div>
 					<div class="lr-label mono">{p}

@@ -27,11 +27,14 @@ from .config import _ENV_LOCAL_FILE, Settings, load_settings
 # ``Settings`` field names; persisted as ``DK_<UPPER>`` with pydantic's prefix.
 WRITABLE_FIELDS: frozenset[str] = frozenset(
     {
-        "provider",
         "backend_url",
         "chat_model",
-        "embed_url",
         "embed_model",
+        "rerank_model",
+        "retrieval_mode",
+        "engine_collection",
+        "engine_binary",
+        "mettle_config",
         "request_timeout_s",
         "chunk_words",
         "chunk_overlap",
@@ -41,12 +44,10 @@ WRITABLE_FIELDS: frozenset[str] = frozenset(
     }
 )
 
-# UI key name -> the env var it persists to. Extendable as providers are added.
+# UI key name -> the env var it persists to. Post-cutover there is exactly one
 SECRET_ENV: dict[str, str] = {
-    "cerebras": "DK_CEREBRAS_API_KEY",
-    "groq": "DK_GROQ_API_KEY",
+    "engine": "DK_ENGINE_KEY",
 }
-
 _PREFIX = "DK_"
 
 
@@ -120,7 +121,7 @@ def update_config(updates: dict[str, object]) -> None:
 
     Type-validates by constructing a real ``Settings`` (init kwargs take priority
     and are validated); the rest of the model loads normally, so we only read
-    back the fields we set. Clearing ``embed_url`` (None/"") removes the override.
+    back the fields we set. Clearing a value (None/"") removes the override.
     """
     if not updates:
         return
@@ -168,12 +169,7 @@ def clear_secret(name: str) -> None:
 
 def secret_status() -> dict[str, bool]:
     """Which provider keys are currently set (booleans only — never the value)."""
-    s = load_settings()
-    return {
-        "cerebras": bool(s.cerebras_api_key),
-        "groq": bool(s.groq_api_key),
-    }
-
+    return {"engine": bool(load_settings().engine_key)}
 
 def _short_validation(e: ValidationError) -> str:
     parts = []

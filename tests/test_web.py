@@ -46,21 +46,21 @@ def test_index_page_served():
 def test_api_corpus_and_config(monkeypatch):
     monkeypatch.setattr(
         webapp, "corpus_stats",
-        lambda: {"totals": {"documents": 1, "chunks": 3}, "embeddings": {"enabled": True}, "index_dir": ".x"},
+        lambda: {"totals": {"documents": 1, "chunks": 3}, "retrieval": {"mode": "hybrid"}, "index_dir": ".x"},
     )
-    monkeypatch.setattr(webapp, "config_view", lambda: {"provider": "local", "chat_model": "gemma4:e2b"})
-    monkeypatch.setattr(webapp, "health_service", lambda: {"ok": True, "provider": "local", "models": ["fake"]})
+    monkeypatch.setattr(webapp, "config_view", lambda: {"backend_url": "http://127.0.0.1:11434/v1", "chat_model": "m"})
+    monkeypatch.setattr(webapp, "health_service", lambda: {"ok": True, "provider": "mettle", "models": ["fake"]})
+    monkeypatch.setattr(webapp, "capacity_stats", lambda: {"remaining_documents_est": 1})
     client = TestClient(webapp.app)
 
     corpus = client.get("/api/corpus").json()
-    assert corpus["totals"]["chunks"] == 3 and corpus["embeddings"]["enabled"] is True
+    assert corpus["totals"]["chunks"] == 3 and corpus["retrieval"]["mode"] == "hybrid"
 
     cfg = client.get("/api/config").json()
-    assert cfg["chat_model"] == "gemma4:e2b"
+    assert cfg["chat_model"] == "m"
 
     overview = client.get("/api/overview").json()
     assert overview["health"]["ok"] is True and overview["totals"]["documents"] == 1
-
 
 def test_ingest_status_when_idle():
     client = TestClient(webapp.app)
@@ -172,19 +172,19 @@ def test_keys_endpoint_never_echoes_secret(monkeypatch):
     store = {}
     monkeypatch.setattr(webapp, "set_secret", lambda p, v: store.update({p: v}))
     monkeypatch.setattr(webapp, "clear_secret", lambda p: store.pop(p, None))
-    monkeypatch.setattr(webapp, "secret_status", lambda: {"groq": "groq" in store, "cerebras": False})
+    monkeypatch.setattr(webapp, "secret_status", lambda: {"engine": "engine" in store})
     client = TestClient(webapp.app)
 
-    r = client.post("/api/config/keys", json={"provider": "groq", "value": "sk-secret"})
+    r = client.post("/api/config/keys", json={"provider": "engine", "value": "sk-secret"})
     assert r.status_code == 200
     body = r.json()
-    assert body == {"api_keys": {"groq": True, "cerebras": False}}
+    assert body == {"api_keys": {"engine": True}}
     import json as _json
 
     assert "sk-secret" not in _json.dumps(body)   # value is never returned
 
-    r2 = client.post("/api/config/keys", json={"provider": "groq", "value": None})
-    assert r2.json()["api_keys"]["groq"] is False  # null value clears
+    r2 = client.post("/api/config/keys", json={"provider": "engine", "value": None})
+    assert r2.json()["api_keys"]["engine"] is False  # null value clears
 
 
 def test_traces_endpoints(monkeypatch):

@@ -10,11 +10,10 @@ import time
 from .agent.graph import Answer, answer
 from .agent.trace import ChatStore, StepSink, TraceCollector, TraceStore
 from .config import Settings, load_settings
-from .ingest.embed import embed_texts, embeddings_available
 from .ingest.index import Corpus
 from .providers.base import SlotUnavailable
 from .providers.router import get_provider
-from .retrieval.rerank_client import make_reranker, rerank_available
+from .retrieval.rerank_client import make_reranker
 from .retrieval.retriever import Retriever
 
 
@@ -24,37 +23,55 @@ def health(settings: Settings | None = None) -> dict:
     s = settings or load_settings()
     try:
         info = get_provider(s).health()
-        return {"ok": True, "provider": s.provider.value, **info}
+        return {"ok": True, "provider": "mettle", **info}
     except Exception as e:  # noqa: BLE001 - report failure as data, don't crash the probe
-        return {"ok": False, "provider": s.provider.value, "error": str(e)}
+        return {"ok": False, "provider": "mettle", "error": str(e)}
 
 
-def load_retriever(settings: Settings | None = None, *, corpus: Corpus | None = None) -> Retriever:
-    """Build a Retriever over the persisted corpus, wiring dense search only when
-    a dedicated embedding endpoint is configured (otherwise sparse-only) and a
-    cross-encoder reranker only when ``DK_RERANK_URL`` is set (otherwise the fused
-    RRF order stands). Both are graceful, offline-safe degradations (T26)."""
+def load_retriever(
+    settings: Settings | None = None,
+    *,
+    corpus: Corpus | None = None,
+    scope_doc: str | None = None,
+) -> Retriever:
+    """Build a Retriever over the persisted lineage, pointed at the engine's
+    collection. Search mode and rerank are engine capabilities — mettle serves
+    both; an engine without them fails loudly (cutover contract §1–2).
+    ``scope_doc`` restricts engine search to one filing's chunks (the search
+    allowlist), for per-document harnesses like full-RAG FinanceBench."""
     s = settings or load_settings()
-    corpus = corpus if corpus is not None else Corpus.load(s.index_dir, backend=s.corpus_store)
-    embed_query = None
-    if embeddings_available(s):
-        embed_query = lambda q: embed_texts([q], settings=s)[0]  # noqa: E731
-    reranker = make_reranker(s) if rerank_available(s) else None
-    return Retriever(corpus, embed_query=embed_query, reranker=reranker)
+    corpus = corpus if corpus is not None else Corpus.load(s.index_dir)
+    return Retriever(
+        get_provider(s),
+        corpus,
+        collection=s.engine_collection,
+        mode=s.retrieval_mode,
+        reranker=make_reranker(s),
+        scope_doc=scope_doc,
+    )
 
 
 def remove_document(doc_id: str, *, settings: Settings | None = None) -> int:
-    """Delete a document (all its chunks + vectors) from the persisted corpus.
+    """Delete a document from the engine's collection and the local lineage.
 
     The single write-side counterpart to ingest — CLI and web both call here so
-    add/remove share one implementation (CLAUDE.md). Returns chunks removed
-    (0 if the id was not present); only rewrites the index when something changed.
+    add/remove share one implementation (CLAUDE.md). Each docket chunk lives in
+    the engine as its own document (id = chunk_id), so removal is one engine
+    DELETE per chunk plus the lineage rewrite. Engine unreachable → loud
+    failure (no silent local-only removal). Returns chunks removed (0 if the id
+    was not present in the lineage).
     """
     s = settings or load_settings()
-    corpus = Corpus.load(s.index_dir, backend=s.corpus_store)
+    corpus = Corpus.load(s.index_dir)
+    chunk_ids = [ch.chunk_id for ch in corpus.chunks if ch.doc_id == doc_id]
+    if not chunk_ids:
+        return 0
+    provider = get_provider(s)
+    for cid in chunk_ids:
+        provider.delete_document(s.engine_collection, cid)
     removed = corpus.remove(doc_id)
     if removed:
-        corpus.save(s.index_dir, backend=s.corpus_store)
+        corpus.save(s.index_dir)
     return removed
 
 

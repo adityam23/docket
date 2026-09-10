@@ -1,11 +1,13 @@
-"""Lite ingest pipeline: PDF folder → pages → chunks → (optional) embeddings →
-persisted Corpus. One place wires the stages together so the CLI and web share
-exactly one ingest path (CLAUDE.md reusability).
+"""Ingest pipeline: PDF folder → pages → chunks → engine documents → persisted
+lineage. One place wires the stages together so the CLI and web share exactly
+one ingest path (CLAUDE.md reusability).
 
-Embeddings are optional: when ``DK_EMBED_URL`` is unset the corpus is built with
-sparse-only retrieval in mind (no vectors) and retrieval degrades to BM25 — the
-pipeline still runs end to end with zero extra services.
-"""
+Post-cutover, docket owns ONLY the chunker and the citation lineage: chunks are
+POSTed to the engine's collection (one engine document per docket chunk, id =
+chunk_id, metadata = filing lineage) and the local store keeps lineage rows
+only — text, embeddings and the index are the engine's (cutover contract §1–2,
+2026-09-10). Engine unreachable → the pipeline fails loudly; there is no local
+fallback."""
 
 from __future__ import annotations
 
@@ -13,11 +15,11 @@ import os
 from typing import Callable, Optional
 
 from ..config import Settings, load_settings
+from ..providers.router import get_provider
 from .chunk import Chunk, chunk_pages
-from .embed import embed_texts, embeddings_available
 from .index import Corpus
-from .ocr import pdf_to_pages
 from .metadata import extract_filing_metadata
+from .ocr import pdf_to_pages
 
 # Progress hook: on_event(doc_id, stage, info). Stages are the pipeline steps a
 # document moves through — the web ingest-job runner subscribes to render live
@@ -27,6 +29,27 @@ StageEvent = Callable[[str, str, dict], None]
 
 def _doc_id(path: str) -> str:
     return os.path.splitext(os.path.basename(path))[0]
+
+
+def _post_chunks(chunks: list[Chunk], *, settings: Settings) -> None:
+    """Ensure the collection exists, then POST each docket chunk to it. Every
+    chunk is one engine document with the filing metadata attached, so the
+    engine's hits can join back to citations on ``document_id``."""
+    provider = get_provider(settings)
+    provider.ensure_collection(settings.engine_collection)
+    for ch in chunks:
+        provider.post_document(
+            settings.engine_collection,
+            ch.chunk_id,
+            ch.text,
+            {
+                "page": str(ch.page),
+                "form_type": ch.form_type,
+                "company": ch.company,
+                "ticker": ch.ticker,
+                "fiscal_period": ch.fiscal_period,
+            },
+        )
 
 
 def ingest_paths(
@@ -41,27 +64,25 @@ def ingest_paths(
     """Ingest specific PDF files into (a new or given) corpus and return it.
 
     ``on_event`` (optional) is called as the single document walks the stages
-    ``ocr → chunk → embed → index → done`` so callers can surface live progress
-    without re-implementing the pipeline (CLAUDE.md: one orchestration path).
+    ``ocr → chunk → post → done`` so callers can surface live progress without
+    re-implementing the pipeline (CLAUDE.md: one orchestration path).
 
     ``source_of`` (optional) maps a read-from path to the citation ``source``
     stored on each chunk. It lets the upload path read from a throwaway temp file
     while recording the user's original filename — so temp paths never leak into
     the persisted index. Defaults to the path itself.
 
-    ``skip_existing`` (default True): a document whose id is already in the corpus
-    is skipped WITHOUT re-running OCR/embed (the expensive stages). ``Corpus.add``
-    was already chunk-idempotent, but only after that work was needlessly redone.
-    Identity is the filename stem (``_doc_id``); to intentionally refresh a
-    document, remove it first (``remove_document``) then ingest, or pass
-    ``skip_existing=False`` to force a re-run.
+    ``skip_existing`` (default True): a document whose id is already in the
+    corpus is skipped WITHOUT re-running OCR (the expensive stage) or re-posting
+    its chunks to the engine. Identity is the filename stem (``_doc_id``); to
+    intentionally refresh a document, remove it first (``remove_document``) then
+    ingest, or pass ``skip_existing=False`` to force a re-run.
     """
     s = settings or load_settings()
     # NB: `corpus or Corpus()` would discard a passed-in *empty* corpus (len 0 is
     # falsy), silently dropping incremental ingests into a fresh index. Use an
     # explicit None check.
     c = corpus if corpus is not None else Corpus()
-    want_vectors = embeddings_available(s)
     # Doc-level dedup: never re-ingest an already-indexed document (nor the same
     # doc_id twice within one batch). Seeded from the corpus, grows as we add.
     seen: set[str] = set(c.doc_ids())
@@ -93,22 +114,18 @@ def ingest_paths(
             emit(doc_id, "skipped", reason="no extractable text")
             continue
 
-        vectors = None
-        if want_vectors:
-            emit(doc_id, "embed", chunks=len(chunks))
-            vectors = embed_texts([ch.text for ch in chunks], settings=s)
-
-        emit(doc_id, "index", chunks=len(chunks))
-        c.add(chunks, vectors)
+        emit(doc_id, "post", chunks=len(chunks))
+        _post_chunks(chunks, settings=s)
+        c.add(chunks)
         seen.add(doc_id)
-        emit(doc_id, "done", chunks=len(chunks), vectorized=bool(vectors))
+        emit(doc_id, "done", chunks=len(chunks))
     return c
 
 
 def ingest_folder(folder: str, *, settings: Settings | None = None) -> Corpus:
     """Ingest every ``*.pdf`` under a folder into a persisted corpus.
 
-    Persists to ``settings.index_dir`` and returns the corpus.
+    Persists the lineage to ``settings.index_dir`` and returns the corpus.
     """
     s = settings or load_settings()
     pdfs = sorted(
@@ -117,7 +134,7 @@ def ingest_folder(folder: str, *, settings: Settings | None = None) -> Corpus:
         for f in files
         if f.lower().endswith(".pdf")
     )
-    corpus = Corpus.load(s.index_dir, backend=s.corpus_store)  # incremental: extend an existing index
+    corpus = Corpus.load(s.index_dir)  # incremental: extend an existing index
     ingest_paths(pdfs, settings=s, corpus=corpus)
-    corpus.save(s.index_dir, backend=s.corpus_store)
+    corpus.save(s.index_dir)
     return corpus

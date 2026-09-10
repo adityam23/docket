@@ -34,9 +34,18 @@ def _retriever():
         {"page": 1, "text": "Net revenue for fiscal 2020 was reported as forty two dollars in the filing."},
         {"page": 2, "text": "Unrelated boilerplate about corporate governance and board committees."},
     ]
+    chunks = chunk_pages(pages, doc_id="ACME_2020_10K", source="acme.pdf", words=12, overlap=0)
+    texts = {ch.chunk_id: ch.text for ch in chunks}
+
+    class _FakeEngine:
+        def collection_search(self, collection, query, *, mode="hybrid", k=10, allowlist=None):
+            rows = [{"chunk_id": cid, "document_id": cid, "text": t, "score": 1.0}
+                    for cid, t in texts.items()]
+            return rows[:k]
+
     c = Corpus()
-    c.add(chunk_pages(pages, doc_id="ACME_2020_10K", source="acme.pdf", words=12, overlap=0))
-    return Retriever(c)
+    c.add(chunks)
+    return Retriever(_FakeEngine(), c, collection="docket")
 
 
 def _item():

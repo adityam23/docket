@@ -25,7 +25,12 @@ from pydantic import BaseModel
 
 from ..agent.trace import compact_step, hit_view
 from ..config import load_settings
-from ..engine import engine_activate, engine_events_stream, engine_view
+from ..engine import (
+    engine_activate,
+    engine_events_stream,
+    engine_view,
+    get_supervisor,
+)
 from ..config_write import (
     ConfigWriteError,
     clear_secret,
@@ -50,6 +55,15 @@ _MAX_FILE_BYTES = 50 * 1024 * 1024
 _MAX_UPLOAD_BYTES = 200 * 1024 * 1024
 
 app = FastAPI(title="docket", version="0.2.0")
+
+
+@app.on_event("startup")
+def _start_engine_supervisor() -> None:
+    """§3: on startup, probe the engine and spawn mettled when configured and
+    unreachable. The supervisor then keeps it alive (crash-restart, bounded
+    backoff) for the process's lifetime."""
+    get_supervisor(load_settings()).ensure()
+
 
 _FRONTEND = Path(__file__).parent / "frontend" / "build"
 
@@ -78,7 +92,7 @@ class ConfigUpdate(BaseModel):
 
 
 class KeyUpdate(BaseModel):
-    provider: str            # "cerebras" | "groq" (config_write.SECRET_ENV)
+    provider: str            # "engine" (config_write.SECRET_ENV)
     value: str | None = None  # set when present; clear when null/empty
 
 
@@ -165,7 +179,7 @@ def api_overview() -> dict:
         "health": health_service(),
         "config": config_view(),
         "totals": stats["totals"],
-        "embeddings": stats["embeddings"],
+        "retrieval": stats["retrieval"],
         "capacity": capacity_stats(),
         "index_dir": stats.get("index_dir"),
     }
@@ -344,6 +358,22 @@ def api_engine_profile(req: EngineProfileRequest) -> dict:
         raise HTTPException(status_code=status, detail=body.get("error") or body)
     raise HTTPException(status_code=502, detail=body.get("error") or f"activation failed ({status})")
 
+
+@app.get("/api/engine/supervision")
+def api_engine_supervision() -> dict:
+    """The supervisor's honest view of mettled's lifecycle: ``offline`` /
+    ``starting`` / ``available`` / ``failed`` — the SPA renders engine state
+    instead of guessing (cutover contract §3/§5: never a silent substitute)."""
+    return get_supervisor(load_settings()).view()
+
+
+@app.post("/api/engine/restart")
+def api_engine_restart() -> dict:
+    """Manual restart — the only exit from the supervisor's terminal
+    ``failed`` state. Resets the backoff budget and kicks the loop; the loop's
+    next cycle decides the state."""
+    get_supervisor(load_settings()).restart()
+    return get_supervisor(load_settings()).view()
 
 @app.get("/api/engine/events")
 def api_engine_events() -> StreamingResponse:

@@ -1,6 +1,6 @@
-"""Offline tests for the lite pipeline: chunk → index → retrieve → answer →
-report, plus the /ask endpoint. No network, no backend, no real LLM — a fake
-provider stands in for inference (per docs/decisions: tests stay deterministic)."""
+"""Offline tests for the pipeline: chunk → engine-post → lineage → retrieve →
+answer → report. No network, no engine, no real LLM — a fake provider stands in
+for the engine's /v1 surface (per docs/decisions: tests stay deterministic)."""
 
 from __future__ import annotations
 
@@ -21,18 +21,19 @@ from docket.ingest.chunk import chunk_pages, chunk_text
 from docket.ingest.index import Corpus
 from docket.providers.base import Capability, ChatResult
 from docket.report.render import to_markdown
-from docket.retrieval.retriever import Retriever, rrf, tokenize
+from docket.retrieval.retriever import Retriever
 
 
 # --- fakes ------------------------------------------------------------------
 
 class FakeProvider:
     name = "fake"
-    capabilities = Capability.CHAT | Capability.LOGPROBS
+    capabilities = Capability.CHAT
 
     def __init__(self, text="Revenue was $10M [1].", logprobs=None):
         self._text = text
         self._logprobs = logprobs if logprobs is not None else [-0.02, -0.05, -0.03]
+        self.posted: list[tuple[str, str, dict]] = []  # (collection, doc_id, metadata)
 
     def health(self):
         return {"models": ["fake"]}
@@ -40,18 +41,65 @@ class FakeProvider:
     def chat(self, messages, **kw) -> ChatResult:
         return ChatResult(text=self._text, logprobs=self._logprobs, raw={})
 
-    def embed(self, texts):
-        # crude deterministic bag-of-words vector so dense search is meaningful
-        return [[float(t.count(c)) for c in "abcdefghijklmnopqrstuvwxyz"] for t in texts]
+    def ensure_collection(self, collection):
+        pass
+
+    def post_document(self, collection, doc_id, text, metadata=None):
+        self.posted.append((collection, doc_id, metadata or {}))
+        return [f"{doc_id}/chunk/0"]
+
+    def delete_document(self, collection, doc_id):
+        return True
 
 
-def _corpus():
+class _SearchFake(FakeProvider):
+    """Fake collection search: ranks chunks sharing ≥1 query token by overlap
+    count (the engine's membership semantics), deterministic and offline."""
+
+    def __init__(self, texts: dict[str, str], **kw):
+        super().__init__(**kw)
+        self._docs = texts          # chunk_id -> chunk text
+        self.last_allowlist = None  # recorded for allowlist assertions
+
+    def collection_search(self, collection, query, *, mode="hybrid", k=10, allowlist=None):
+        assert mode in ("dense", "keyword", "hybrid"), f"bad mode {mode!r}"
+        q_tokens = set(re.findall(r"[a-z0-9]+", query.lower()))
+        q_ids = set(allowlist) if allowlist is not None else set(self._docs)
+        self.last_allowlist = list(allowlist) if allowlist is not None else None
+        rows = []
+        for cid in sorted(self._docs):
+            if cid not in q_ids:
+                continue
+            toks = set(re.findall(r"[a-z0-9]+", self._docs[cid].lower()))
+            overlap = len(q_tokens & toks)
+            if overlap:
+                rows.append({"chunk_id": cid, "document_id": cid,
+                             "text": self._docs[cid], "score": float(overlap)})
+        rows.sort(key=lambda r: (-r["score"], r["chunk_id"]))
+        return rows[:k]
+
+
+def _ret(chunks, **kw) -> Retriever:
+    """A Retriever over a corpus built from text-bearing ``chunks``, backed by
+    a fake engine whose search ranks by query-token overlap (the engine's
+    membership semantics), deterministic and offline."""
+    c = Corpus()
+    c.add(chunks)
+    p = _SearchFake({ch.chunk_id: ch.text for ch in chunks})
+    return Retriever(p, c, collection="docket", **kw)
+
+
+def _acme_chunks():
     pages = [
         {"page": 1, "text": "Total revenue for the fiscal year was ten million dollars."},
         {"page": 2, "text": "Operating expenses rose while headcount stayed flat."},
     ]
+    return chunk_pages(pages, doc_id="acme-10k", source="acme.pdf", words=8, overlap=2)
+
+
+def _corpus():
     c = Corpus()
-    c.add(chunk_pages(pages, doc_id="acme-10k", source="acme.pdf", words=8, overlap=2))
+    c.add(_acme_chunks())
     return c
 
 
@@ -73,24 +121,39 @@ def test_corpus_remove_and_doc_ids():
     assert c.remove("a") == 0  # removing a gone doc is a no-op
 
 
-def test_remove_document_service_persists(tmp_path):
-    from docket.service import remove_document
+def test_lineage_persists_without_text(tmp_path):
+    # The corpus stores lineage (incl. chars), never chunk text: display text
+    # comes back from engine hits (cutover contract §1.4).
+    c = _corpus()
+    c.save(str(tmp_path))
+    loaded = Corpus.load(str(tmp_path))
+    assert [ch.chunk_id for ch in loaded.chunks] == [ch.chunk_id for ch in c.chunks]
+    first = c.chunks[0]
+    back = loaded.get(first.chunk_id)
+    assert back.doc_id == first.doc_id and back.page == first.page
+    assert back.source == first.source
 
-    s = Settings(index_dir=str(tmp_path), embed_url=None)
+
+def test_remove_document_service_persists(tmp_path, monkeypatch):
+    import docket.service as svc
+
+    monkeypatch.setattr(svc, "get_provider", lambda s: FakeProvider())
+    s = Settings(index_dir=str(tmp_path))
     c = Corpus()
     c.add(chunk_pages([{"page": 1, "text": "foo bar baz"}], doc_id="d1", words=2, overlap=0))
     c.add(chunk_pages([{"page": 1, "text": "qux quux corge"}], doc_id="d2", words=2, overlap=0))
     c.save(s.index_dir)
 
-    assert remove_document("d1", settings=s) > 0
+    assert svc.remove_document("d1", settings=s) > 0
     assert Corpus.load(s.index_dir).doc_ids() == ["d2"]
-    assert remove_document("nope", settings=s) == 0  # unknown id
+    assert svc.remove_document("nope", settings=s) == 0  # unknown id
 
 
-def test_load_samples_idempotent(tmp_path):
+def test_load_samples_idempotent(tmp_path, monkeypatch):
     from docket.ingest.samples import load_samples, sample_doc_ids
 
-    s = Settings(index_dir=str(tmp_path), embed_url=None)  # embeddings off → sparse
+    monkeypatch.setattr("docket.ingest.pipeline.get_provider", lambda s: FakeProvider())
+    s = Settings(index_dir=str(tmp_path))
     c = load_samples(settings=s)
     ids = set(c.doc_ids())
     assert set(sample_doc_ids()) <= ids
@@ -105,7 +168,7 @@ def test_load_samples_idempotent(tmp_path):
 def test_capacity_stats_empty_and_measured(tmp_path):
     from docket.web.observability import capacity_stats
 
-    s = Settings(index_dir=str(tmp_path), embed_url=None)
+    s = Settings(index_dir=str(tmp_path))
     empty = capacity_stats(s)
     assert empty["documents_ingested"] == 0
     assert empty["bytes_per_document_measured"] is False
@@ -138,102 +201,68 @@ def test_chunk_never_crosses_pages():
 
 # --- index ------------------------------------------------------------------
 
-def test_dense_search_and_persistence(tmp_path):
-    c = Corpus()
-    from docket.ingest.chunk import Chunk
-
-    c.add(
-        [Chunk("d", "d#0", 1, "alpha"), Chunk("d", "d#1", 1, "beta")],
-        [[1.0, 0.0], [0.0, 1.0]],
-    )
-    hits = c.dense_search([0.9, 0.1], k=1)
-    assert hits[0][0] == "d#0"
-
-    c.save(str(tmp_path))
-    loaded = Corpus.load(str(tmp_path))
-    assert len(loaded) == 2
-    assert loaded.has_vectors
-    assert loaded.dense_search([0.0, 1.0], k=1)[0][0] == "d#1"
-
-
 def test_add_is_idempotent():
     c = _corpus()
     n = len(c)
-    c.add(chunk_pages([{"page": 1, "text": "Total revenue for the fiscal year was ten million dollars."}],
-                      doc_id="acme-10k", words=8, overlap=2))
+    c.add(chunk_pages(
+        [{"page": 1, "text": "Total revenue for the fiscal year was ten million dollars."}],
+        doc_id="acme-10k", source="acme.pdf", words=8, overlap=2))
     assert len(c) == n  # duplicate chunk_ids skipped
 
 
-# --- retriever --------------------------------------------------------------
+# --- retriever (engine client) ----------------------------------------------
 
-def test_rrf_fuses_rankings():
-    fused = rrf([["a", "b", "c"], ["c", "a"]])
-    assert fused["a"] > fused["b"]  # a ranks high in both
-    assert set(fused) == {"a", "b", "c"}
-
-
-def test_sparse_retrieval_finds_needle():
-    r = Retriever(_corpus())
+def test_retrieval_joins_engine_hits_to_lineage():
+    r = _ret(_acme_chunks())
     hits = r.retrieve("revenue", k=3)
     assert hits and "revenue" in hits[0]["text"].lower()
     assert hits[0]["doc_id"] == "acme-10k" and hits[0]["page"] == 1
+    assert hits[0]["engine_chunk_id"]  # engine's own chunk id carried along
 
 
-def test_hybrid_uses_dense_when_embedder_present():
-    c = _corpus()
-    # attach vectors so dense path is live
-    fp = FakeProvider()
-    vecs = fp.embed([ch.text for ch in c.chunks])
-    c.vectors = vecs
-    r = Retriever(c, embed_query=lambda q: fp.embed([q])[0])
-    hits = r.retrieve("expenses headcount", k=2)
-    assert any("expenses" in h["text"].lower() for h in hits)
+def test_retrieve_empty_corpus_skips_engine():
+    # No lineage → no candidates exist; the doomed engine call is skipped, not
+    # a silent substitute (there is nothing to retrieve over).
+    p = _SearchFake({})
+    r = Retriever(p, Corpus(), collection="docket")
+    assert r.retrieve("anything") == []
+    assert not p.posted
 
 
-def test_retrieve_empty_corpus():
-    assert Retriever(Corpus()).retrieve("anything") == []
+def test_unknown_mode_rejected_loudly():
+    with pytest.raises(ValueError, match="unknown search mode"):
+        _ret(_acme_chunks(), mode="rerank_experimental")
 
 
-def _homogeneous_corpus():
-    """Every doc shares the query terms → BM25 idf goes negative. Plus one doc
-    that shares nothing, to check it stays excluded."""
+def test_scope_doc_restricts_engine_allowlist():
+    chunks = _multi_doc_chunks()
+    p = _SearchFake({ch.chunk_id: ch.text for ch in chunks})
     c = Corpus()
-    for i in range(1, 4):
-        c.add(chunk_pages([{"page": 1, "text": f"Your monthly charge is {i}0 dollars."}],
-                          doc_id=f"bill-{i}", words=12, overlap=0))
-    c.add(chunk_pages([{"page": 1, "text": "Unrelated board meeting minutes."}],
-                      doc_id="misc", words=12, overlap=0))
-    return c
+    c.add(chunks)
+    r = Retriever(p, c, collection="docket", scope_doc="bill-2")
+    hits = r.retrieve("monthly charge", k=10)
+    # The allowlist the engine received covers ONLY bill-2's chunks.
+    assert p.last_allowlist == [ch.chunk_id for ch in chunks if ch.doc_id == "bill-2"]
+    assert {h["doc_id"] for h in hits} == {"bill-2"}
 
 
-def test_sparse_recall_on_ubiquitous_terms():
-    # Regression: 'monthly'/'charge' are in every bill, so Okapi idf is negative
-    # and the old `score > 0` filter dropped all matches (retrieval returned []).
-    hits = Retriever(_homogeneous_corpus()).retrieve("monthly charge", k=10)
-    ids = {h["doc_id"] for h in hits}
-    assert ids == {"bill-1", "bill-2", "bill-3"}  # all matches kept, non-match excluded
-
-
-def test_sparse_recall_consistent_across_bm25_backends(monkeypatch):
-    # The pure-Python fallback and rank_bm25 must give the SAME recall, so the
-    # experience doesn't change with the `ingest` extra installed or not.
-    import docket.retrieval.retriever as rmod
-    from docket.retrieval.retriever import _PurePythonBM25
-
-    default_ids = {h["doc_id"] for h in Retriever(_homogeneous_corpus()).retrieve("monthly charge", k=10)}
-    monkeypatch.setattr(rmod, "_build_bm25", lambda toks: _PurePythonBM25(toks))
-    pure_ids = {h["doc_id"] for h in Retriever(_homogeneous_corpus()).retrieve("monthly charge", k=10)}
-    assert default_ids == pure_ids == {"bill-1", "bill-2", "bill-3"}
-
-
-def test_tokenize():
-    assert tokenize("Revenue: $10M, up 5%!") == ["revenue", "10m", "up", "5"]
+def test_iterative_retrieve_merges_and_dedups():
+    chunks = chunk_pages(
+        [{"page": 1, "text": "revenue grew ten million"}], doc_id="d", words=6, overlap=0)
+    p = _SearchFake({ch.chunk_id: ch.text for ch in chunks})
+    c = Corpus()
+    c.add(chunks)
+    hits = Retriever(p, c, collection="docket").iterative_retrieve(
+        ["revenue", "revenue grew"], k=5)
+    assert hits
+    assert [h["rank"] for h in hits] == sorted(h["rank"] for h in hits)
+    assert len({h["chunk_id"] for h in hits}) == len(hits)  # deduped
 
 
 # --- orchestrator -----------------------------------------------------------
 
 def test_answer_is_grounded_cited_and_scored():
-    r = Retriever(_corpus())
+    r = _ret(_acme_chunks())
     res = answer("What was revenue?", retriever=r, provider=FakeProvider(), settings=Settings())
     assert res.reliability == "high"           # low surprisal logprobs
     assert res.citations and res.citations[0].doc_id == "acme-10k"
@@ -241,39 +270,37 @@ def test_answer_is_grounded_cited_and_scored():
 
 
 def test_answer_low_confidence_label():
-    r = Retriever(_corpus())
+    r = _ret(_acme_chunks())
     unsure = FakeProvider(logprobs=[-1.8, -2.2, -1.5])
     res = answer("What was revenue?", retriever=r, provider=unsure, settings=Settings(max_hops=1))
     assert res.reliability == "low"
 
 
 def test_answer_unknown_without_logprobs():
-    r = Retriever(_corpus())
+    r = _ret(_acme_chunks())
     res = answer("q", retriever=r, provider=FakeProvider(logprobs=[]), settings=Settings())
     assert res.reliability == "unknown"
 
 
 # --- observability read model -----------------------------------------------
 
-def test_corpus_stats_reports_docs_stages_and_embeddings(tmp_path, monkeypatch):
+def test_corpus_stats_reports_docs_and_stages(tmp_path):
     from docket.ingest.chunk import Chunk
     from docket.web.observability import corpus_stats
 
     c = Corpus()
-    c.add(
-        [Chunk("acme", "acme#0", 1, "alpha revenue"), Chunk("acme", "acme#1", 2, "beta expenses")],
-        [[1.0, 0.0], [0.0, 1.0]],
-    )
-    c.add([Chunk("memo", "memo#0", 1, "gamma note")])  # sparse-only doc
+    c.add([Chunk("acme", "acme#0", 1, "alpha revenue"), Chunk("acme", "acme#1", 2, "beta expenses")])
+    c.add([Chunk("memo", "memo#0", 1, "gamma note")])
     c.save(str(tmp_path))
 
-    s = Settings(index_dir=str(tmp_path), embed_url="http://x/v1")  # dense enabled
+    s = Settings(index_dir=str(tmp_path))
     stats = corpus_stats(s)
     assert stats["totals"]["documents"] == 2 and stats["totals"]["chunks"] == 3
-    assert stats["embeddings"]["enabled"] and stats["embeddings"]["dim"] == 2
+    assert stats["totals"]["chars"] > 0
     by_id = {d["doc_id"]: d for d in stats["documents"]}
-    assert by_id["acme"]["stage"] == "embedded" and by_id["acme"]["pages"] == 2
-    assert by_id["memo"]["stage"] == "indexed"  # no vectors → sparse-only
+    assert by_id["acme"]["stage"] == "indexed" and by_id["acme"]["pages"] == 2
+    assert by_id["memo"]["stage"] == "indexed"
+    assert stats["retrieval"]["mode"] == "hybrid"
 
 
 # --- tools + report ---------------------------------------------------------
@@ -320,16 +347,16 @@ def test_plan_operation_classifies():
     assert plan_operation("What was revenue in 2023?") is None  # plain QA, untouched
 
 
-def _multi_doc_corpus():
-    # Three near-identical bills: the charge terms appear in EVERY doc, which
-    # drives BM25 idf negative. Retrieval must still find all three (see
-    # test_sparse_recall_on_ubiquitous_terms) — no filler docs papering over it.
-    c = Corpus()
+def _multi_doc_chunks():
+    # Three near-identical bills: the charge terms appear in EVERY doc. The
+    # engine's search (fake here) must still return all three — no filler docs
+    # papering over it.
+    chunks = []
     for i, amt in enumerate(("$10", "$20", "$30"), start=1):
-        c.add(chunk_pages(
+        chunks += chunk_pages(
             [{"page": 1, "text": f"Your monthly subscription charge is {amt} per month."}],
-            doc_id=f"bill-{i}", source=f"bill{i}.pdf", words=12, overlap=0))
-    return c
+            doc_id=f"bill-{i}", source=f"bill{i}.pdf", words=12, overlap=0)
+    return chunks
 
 
 class _ExtractingProvider(FakeProvider):
@@ -347,7 +374,7 @@ class _ExtractingProvider(FakeProvider):
 
 
 def test_answer_aggregates_across_docs():
-    r = Retriever(_multi_doc_corpus())
+    r = _ret(_multi_doc_chunks())
     res = answer(
         "What is the total monthly charge across all documents?",
         retriever=r, provider=_ExtractingProvider(), settings=Settings(),
@@ -362,7 +389,7 @@ def test_answer_aggregates_across_docs():
 
 
 def test_answer_aggregate_without_values_is_honest():
-    r = Retriever(_multi_doc_corpus())
+    r = _ret(_multi_doc_chunks())
     res = answer(
         "What is the total charge across all documents?",
         retriever=r, provider=FakeProvider(text="[]"), settings=Settings(),
@@ -378,14 +405,13 @@ def test_aggregate_dedups_overlapping_duplicate_values():
     # "incorrect total" bug). Same doc+page+value → counted once, not twice.
     from docket.ingest.chunk import Chunk
 
-    c = Corpus()
-    c.add([
+    chunks = [
         Chunk("bill", "bill#0", 1, "monthly charge is $10 per month"),
         Chunk("bill", "bill#1", 1, "the $10 per month monthly charge applies"),
-    ])
+    ]
     res = answer(
         "What is the total monthly charge across all documents?",
-        retriever=Retriever(c), provider=_ExtractingProvider(), settings=Settings(),
+        retriever=_ret(chunks), provider=_ExtractingProvider(), settings=Settings(),
     )
     assert res.detail["result"] == 10.0 and res.detail["count"] == 1  # not $20
     assert {cit.doc_id for cit in res.citations} == {"bill"}
@@ -396,12 +422,13 @@ def test_aggregate_flags_partial_coverage():
     # total must be flagged partial rather than presented as complete.
     from docket.ingest.chunk import Chunk
 
-    c = Corpus()
-    c.add([Chunk("bill-a", "bill-a#0", 1, "monthly charge is $10 per month")])
-    c.add([Chunk("bill-b", "bill-b#0", 1, "a monthly charge applies but no figure per month here")])
+    chunks = [
+        Chunk("bill-a", "bill-a#0", 1, "monthly charge is $10 per month"),
+        Chunk("bill-b", "bill-b#0", 1, "a monthly charge applies but no figure per month here"),
+    ]
     res = answer(
         "What is the total monthly charge across all documents?",
-        retriever=Retriever(c), provider=_ExtractingProvider(), settings=Settings(),
+        retriever=_ret(chunks), provider=_ExtractingProvider(), settings=Settings(),
     )
     cov = res.detail["coverage"]
     assert cov["partial"] is True
@@ -410,15 +437,17 @@ def test_aggregate_flags_partial_coverage():
 
 
 def test_ingest_paths_skips_already_indexed_doc(monkeypatch, tmp_path):
-    # T09: re-ingesting an already-indexed document must skip WITHOUT re-running
-    # OCR/embed; skip_existing=False forces a re-run.
+    # Re-ingesting an already-indexed document must skip WITHOUT re-running OCR
+    # or re-posting chunks to the engine; skip_existing=False forces a re-run.
     import docket.ingest.pipeline as pipe
 
+    stub = FakeProvider()
+    monkeypatch.setattr(pipe, "get_provider", lambda s: stub)
     monkeypatch.setattr(
         pipe, "pdf_to_pages",
         lambda path: [{"page": 1, "text": "monthly charge is ten dollars per year"}],
     )
-    s = Settings(index_dir=str(tmp_path), embed_url=None)  # embeddings off → no network
+    s = Settings(index_dir=str(tmp_path))
     c = Corpus()
 
     first = []
@@ -426,6 +455,7 @@ def test_ingest_paths_skips_already_indexed_doc(monkeypatch, tmp_path):
                       on_event=lambda d, st, i: first.append((d, st)))
     n = len(c)
     assert n > 0 and ("acme", "ocr") in first
+    assert stub.posted  # chunks actually went to the engine
 
     again = []
     pipe.ingest_paths(["/other/path/acme.pdf"], settings=s, corpus=c,
@@ -440,28 +470,44 @@ def test_ingest_paths_skips_already_indexed_doc(monkeypatch, tmp_path):
     assert ("acme", "ocr") in forced                # force bypasses the skip
 
 
-def test_capacity_reports_ram_bound(tmp_path):
-    # T14: capacity is the tighter of disk and RAM, and reports which one binds.
+def test_ingest_posts_filing_metadata_to_engine(monkeypatch, tmp_path):
+    # Citation metadata must ride along to the engine document (round-trips into
+    # mettle's documents.metadata_json).
+    import docket.ingest.pipeline as pipe
+
+    stub = FakeProvider()
+    monkeypatch.setattr(pipe, "get_provider", lambda s: stub)
+    monkeypatch.setattr(
+        pipe, "pdf_to_pages",
+        lambda path: [{"page": 1, "text": "total revenue was ten million dollars"}],
+    )
+    s = Settings(index_dir=str(tmp_path))
+    pipe.ingest_paths(["/some/where/3M_2018_10K.pdf"], settings=s, corpus=Corpus())
+    assert stub.posted
+    _, doc_id, meta = stub.posted[0]
+    assert doc_id == "3M_2018_10K#0"
+    assert meta["form_type"] == "10-K"
+    assert meta["page"] == "1" and meta["fiscal_period"] == "2018"
+
+
+def test_capacity_reports_disk_bound(tmp_path):
+    # The local store is lineage-only; capacity is disk-bound (engine-side
+    # storage owns text and vectors).
     from docket.web.observability import capacity_stats
 
-    s = Settings(index_dir=str(tmp_path), embed_url=None)
+    s = Settings(index_dir=str(tmp_path))
     c = Corpus()
     c.add(chunk_pages([{"page": 1, "text": "alpha " * 60}], doc_id="d1", words=20, overlap=5))
     c.save(s.index_dir)
 
     cap = capacity_stats(s)
-    assert cap["binding_constraint"] in ("disk", "ram")
+    assert cap["binding_constraint"] == "disk"
     assert cap["disk_bound_documents_est"] >= 0
-    assert cap["ram_bytes_per_document"] > 0
-    if cap["device"]["ram_total_bytes"]:  # platform exposes total RAM
-        assert cap["ram_bound_documents_est"] is not None
-        assert cap["remaining_documents_est"] == min(
-            cap["disk_bound_documents_est"], cap["ram_bound_documents_est"]
-        )
+    assert cap["remaining_documents_est"] == cap["disk_bound_documents_est"]
 
 
 def test_generate_report_and_render():
-    r = Retriever(_corpus())
+    r = _ret(_acme_chunks())
     res = answer("What was revenue?", retriever=r, provider=FakeProvider(), settings=Settings())
     report = generate_report(res, title="Acme 10-K")
     md = to_markdown(report)

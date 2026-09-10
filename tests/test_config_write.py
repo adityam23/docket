@@ -22,15 +22,15 @@ def _redirect(monkeypatch, tmp_path):
 
 def test_update_config_round_trips_and_is_readable(tmp_path, monkeypatch):
     envfile = _redirect(monkeypatch, tmp_path)
-    cw.update_config({"chat_model": "my-model", "retrieval_k": 9, "provider": "groq"})
+    cw.update_config({"chat_model": "my-model", "retrieval_k": 9, "retrieval_mode": "hybrid"})
     text = envfile.read_text()
     assert "DK_CHAT_MODEL=my-model" in text
     assert "DK_RETRIEVAL_K=9" in text
-    assert "DK_PROVIDER=groq" in text
+    assert "DK_RETRIEVAL_MODE=hybrid" in text
 
     # A Settings pointed at this overlay picks the values up (usable next request).
     s = Settings(_env_file=str(envfile))
-    assert s.chat_model == "my-model" and s.retrieval_k == 9 and s.provider.value == "groq"
+    assert s.chat_model == "my-model" and s.retrieval_k == 9 and s.retrieval_mode == "hybrid"
 
 
 def test_update_config_perms_0600(tmp_path, monkeypatch):
@@ -39,12 +39,12 @@ def test_update_config_perms_0600(tmp_path, monkeypatch):
     assert stat.S_IMODE(os.stat(envfile).st_mode) == 0o600
 
 
-def test_update_config_clears_empty_embed_url(tmp_path, monkeypatch):
+def test_update_config_clears_empty_engine_collection(tmp_path, monkeypatch):
     envfile = _redirect(monkeypatch, tmp_path)
-    cw.update_config({"embed_url": "http://x/v1"})
-    assert "DK_EMBED_URL=http://x/v1" in envfile.read_text()
-    cw.update_config({"embed_url": ""})  # empty → remove the override
-    assert "DK_EMBED_URL" not in envfile.read_text()
+    cw.update_config({"engine_collection": "filings"})
+    assert "DK_ENGINE_COLLECTION=filings" in envfile.read_text()
+    cw.update_config({"engine_collection": ""})  # empty → remove the override
+    assert "DK_ENGINE_COLLECTION" not in envfile.read_text()
 
 
 def test_update_config_rejects_unknown_and_bad_type(tmp_path, monkeypatch):
@@ -59,12 +59,12 @@ def test_update_config_rejects_unknown_and_bad_type(tmp_path, monkeypatch):
 
 def test_set_and_clear_secret(tmp_path, monkeypatch):
     envfile = _redirect(monkeypatch, tmp_path)
-    cw.set_secret("groq", "sk-abc123")
-    assert "DK_GROQ_API_KEY=sk-abc123" in envfile.read_text()
+    cw.set_secret("engine", "sk-abc123")
+    assert "DK_ENGINE_KEY=sk-abc123" in envfile.read_text()
     assert stat.S_IMODE(os.stat(envfile).st_mode) == 0o600
 
-    cw.clear_secret("groq")
-    assert "DK_GROQ_API_KEY" not in envfile.read_text()
+    cw.clear_secret("engine")
+    assert "DK_ENGINE_KEY" not in envfile.read_text()
 
 
 def test_secret_rejects_unknown_empty_and_injection(tmp_path, monkeypatch):
@@ -72,16 +72,16 @@ def test_secret_rejects_unknown_empty_and_injection(tmp_path, monkeypatch):
     with pytest.raises(cw.ConfigWriteError):
         cw.set_secret("unknown_provider", "x")
     with pytest.raises(cw.ConfigWriteError):
-        cw.set_secret("groq", "")                       # empty
+        cw.set_secret("engine", "")                     # empty
     with pytest.raises(cw.ConfigWriteError):
-        cw.set_secret("groq", "line1\nAA_EVIL=1")       # newline injection guard
+        cw.set_secret("engine", "line1\nAA_EVIL=1")     # newline injection guard
 
 
 def test_config_view_redacts_secrets(monkeypatch):
     from docket.web.observability import config_view
     import json
 
-    monkeypatch.setenv("DK_GROQ_API_KEY", "super-secret-xyz")
+    monkeypatch.setenv("DK_ENGINE_KEY", "super-secret-xyz")
     cfg = config_view()
-    assert cfg["api_keys"]["groq"] is True
+    assert cfg["api_keys"]["engine"] is True
     assert "super-secret-xyz" not in json.dumps(cfg)     # never surfaced, only a bool

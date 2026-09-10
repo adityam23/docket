@@ -7,9 +7,9 @@ few *synthetic* documents so a new user can try retrieval/QA without exposing an
 real data. Sample doc ids are prefixed ``sample-`` so they are easy to spot and
 remove via the normal document controls.
 
-Reuses the shared chunk → embed → Corpus.add tail (CLAUDE.md: one ingest path);
-only the PDF/OCR front is skipped because the content ships as plain text.
-"""
+Reuses the shared chunk → engine-post → lineage tail (CLAUDE.md: one ingest
+path); only the PDF/OCR front is skipped because the content ships as plain
+text."""
 
 from __future__ import annotations
 
@@ -19,9 +19,8 @@ from typing import Optional
 
 from ..config import Settings, load_settings
 from .chunk import Chunk, chunk_pages
-from .embed import embed_texts, embeddings_available
 from .index import Corpus
-from .pipeline import StageEvent
+from .pipeline import StageEvent, _post_chunks
 
 SAMPLE_PREFIX = "sample-"
 
@@ -44,12 +43,10 @@ def load_samples(
     """Add the bundled synthetic sample documents to the corpus and persist.
 
     Idempotent: ``Corpus.add`` skips chunks already present by id, so re-loading
-    the samples is a no-op. Embeddings are computed only when a dedicated endpoint
-    is configured (otherwise the samples are sparse-only, like any other doc).
-    """
+    the samples is a no-op. Chunks are POSTed to the engine like every other
+    document (engine unreachable → loud failure, like every engine feature)."""
     s = settings or load_settings()
-    c = corpus if corpus is not None else Corpus.load(s.index_dir, backend=s.corpus_store)
-    want_vectors = embeddings_available(s)
+    c = corpus if corpus is not None else Corpus.load(s.index_dir)
 
     def emit(doc_id: str, stage: str, **info: object) -> None:
         if on_event is not None:
@@ -69,13 +66,10 @@ def load_samples(
         if not chunks:
             emit(doc_id, "skipped", reason="empty sample")
             continue
-        vectors = None
-        if want_vectors:
-            emit(doc_id, "embed", chunks=len(chunks))
-            vectors = embed_texts([ch.text for ch in chunks], settings=s)
-        emit(doc_id, "index", chunks=len(chunks))
-        c.add(chunks, vectors)
-        emit(doc_id, "done", chunks=len(chunks), vectorized=bool(vectors))
+        emit(doc_id, "post", chunks=len(chunks))
+        _post_chunks(chunks, settings=s)
+        c.add(chunks)
+        emit(doc_id, "done", chunks=len(chunks))
 
-    c.save(s.index_dir, backend=s.corpus_store)
+    c.save(s.index_dir)
     return c

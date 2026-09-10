@@ -1,58 +1,71 @@
-"""Corpus store for the lite profile: chunks + optional dense vectors, with
-brute-force cosine search and zero-config JSON persistence.
+"""Corpus store — docket's OWN slice post-cutover: chunk lineage for citations,
+doc-level dedup, and ingest state. Chunk TEXT is not stored; display text comes
+back from mettle search hits, joined on the engine document id (= docket
+chunk_id). Dense vectors are the engine's (turbovec); local brute-force cosine
+is gone with the local retrieval legs (cutover contract §1, 2026-09-10).
 
-Design:
-- **Lite** is embedded and honest about scale — an any-PDF folder is small, so a
-  dependency-free brute-force cosine over stored vectors is correct and keeps
-  `uv sync` tiny. `turbovec` (TurboQuant) is a drop-in dense backend for larger
-  corpora, loaded lazily behind the same `dense_search` seam when installed.
-- Metadata/lineage lives beside the vectors; DuckDB (the `platform` path) can
-  replace the JSON store later without touching callers.
-
-One concept, one implementation: this is the *only* corpus store; retrieval and
-the agent tools read chunks through it.
-"""
+One concept, one implementation: this is the *only* corpus store; the retriever
+joins engine hits through it."""
 
 from __future__ import annotations
 
 import json
-import math
 import os
+from dataclasses import asdict, dataclass
 
-from .chunk import Chunk
+
+@dataclass(frozen=True)
+class Lineage:
+    """Where a chunk came from — the citation surface. ``chars`` preserves the
+    chunk size for telemetry once the text itself is dropped (engine hits carry
+    it back). ``chunk_id`` doubles as the engine document id."""
+
+    chunk_id: str           # stable, unique: f"{doc_id}#{n}"; = engine doc id
+    doc_id: str
+    page: int               # 1-based source page
+    source: str = ""        # original file path
+    form_type: str = ""     # e.g. "10-K", "10-Q", "8-K"
+    company: str = ""       # registrant name
+    ticker: str = ""        # e.g. "MMM"
+    fiscal_period: str = "" # e.g. "2018", "FY2022", "Q3 2021"
+    chars: int = 0
 
 
-def _cosine(a: list[float], b: list[float]) -> float:
-    dot = sum(x * y for x, y in zip(a, b))
-    na = math.sqrt(sum(x * x for x in a))
-    nb = math.sqrt(sum(y * y for y in b))
-    if na == 0.0 or nb == 0.0:
-        return 0.0
-    return dot / (na * nb)
+def _lineage_of(chunk) -> Lineage:
+    return Lineage(
+        chunk_id=chunk.chunk_id,
+        doc_id=chunk.doc_id,
+        page=chunk.page,
+        source=chunk.source,
+        form_type=chunk.form_type,
+        company=chunk.company,
+        ticker=chunk.ticker,
+        fiscal_period=chunk.fiscal_period,
+        chars=len(chunk.text),
+    )
 
 
 class Corpus:
-    """Chunks + parallel optional dense vectors, addressable by ``chunk_id``."""
+    """Chunk-lineage rows addressable by ``chunk_id``, dedupable by ``doc_id``."""
 
     def __init__(self) -> None:
-        self.chunks: list[Chunk] = []
-        self.vectors: list[list[float] | None] = []
+        self.chunks: list[Lineage] = []
         self._by_id: dict[str, int] = {}
 
     def __len__(self) -> int:
         return len(self.chunks)
 
-    def add(self, chunks: list[Chunk], vectors: list[list[float]] | None = None) -> None:
-        if vectors is not None and len(vectors) != len(chunks):
-            raise ValueError("vectors length must match chunks length")
-        for i, ch in enumerate(chunks):
+    def add(self, chunks) -> None:
+        """Append lineage rows for chunks. Idempotent per chunk_id (a re-added
+        chunk replaces nothing — callers dedup at doc level before adding)."""
+        for ch in chunks:
             if ch.chunk_id in self._by_id:
-                continue  # idempotent re-ingest
-            self._by_id[ch.chunk_id] = len(self.chunks)
-            self.chunks.append(ch)
-            self.vectors.append(vectors[i] if vectors is not None else None)
+                continue
+            row = ch if isinstance(ch, Lineage) else _lineage_of(ch)
+            self._by_id[row.chunk_id] = len(self.chunks)
+            self.chunks.append(row)
 
-    def get(self, chunk_id: str) -> Chunk:
+    def get(self, chunk_id: str) -> Lineage:
         return self.chunks[self._by_id[chunk_id]]
 
     def doc_ids(self) -> list[str]:
@@ -63,81 +76,38 @@ class Corpus:
         return list(seen)
 
     def remove(self, doc_id: str) -> int:
-        """Drop every chunk (and its vector) belonging to ``doc_id``.
-
-        Returns the number of chunks removed. Rebuilds the id index; O(n), which
-        is correct for the small lite corpus. The inverse of ``add`` — the one
-        place a document leaves the index (CLAUDE.md reuse).
-        """
-        keep_chunks: list[Chunk] = []
-        keep_vecs: list[list[float] | None] = []
-        removed = 0
-        for ch, vec in zip(self.chunks, self.vectors):
-            if ch.doc_id == doc_id:
-                removed += 1
-                continue
-            keep_chunks.append(ch)
-            keep_vecs.append(vec)
+        """Drop every lineage row belonging to ``doc_id``. Returns rows removed
+        (0 if the id was not present)."""
+        kept = [ch for ch in self.chunks if ch.doc_id != doc_id]
+        removed = len(self.chunks) - len(kept)
         if removed:
-            self.chunks = keep_chunks
-            self.vectors = keep_vecs
+            self.chunks = kept
             self._by_id = {ch.chunk_id: i for i, ch in enumerate(self.chunks)}
         return removed
 
-    @property
-    def has_vectors(self) -> bool:
-        return any(v is not None for v in self.vectors)
-
-    def dense_search(self, query_vec: list[float], k: int = 10) -> list[tuple[str, float]]:
-        """Cosine over stored vectors → ``[(chunk_id, score), ...]`` desc."""
-        scored = [
-            (self.chunks[i].chunk_id, _cosine(query_vec, v))
-            for i, v in enumerate(self.vectors)
-            if v is not None
-        ]
-        scored.sort(key=lambda t: t[1], reverse=True)
-        return scored[:k]
-
-    def save(self, path: str, backend: str = "jsonl") -> None:
-        """Persist the corpus under ``path``.
-
-        ``backend`` selects the store: ``"jsonl"`` (default, lite, zero-config)
-        or ``"duckdb"`` (platform, SQL-backed). The default keeps every existing
-        caller working unchanged; the platform profile passes ``duckdb``.
-        """
-        if backend == "duckdb":
-            from .duckdb_store import save as _save_db
-            _save_db(self, path)
-            return
+    def save(self, path: str) -> None:
+        """Persist the lineage as JSONL under ``path``."""
         os.makedirs(path, exist_ok=True)
-        with open(os.path.join(path, "corpus.jsonl"), "w") as f:
-            for ch, vec in zip(self.chunks, self.vectors):
-                f.write(json.dumps({**ch.as_dict(), "vector": vec}) + "\n")
+        with open(os.path.join(path, "corpus.jsonl"), "w", encoding="utf-8") as f:
+            for row in self.chunks:
+                f.write(json.dumps(asdict(row)) + "\n")
 
     @classmethod
-    def load(cls, path: str, backend: str = "jsonl") -> "Corpus":
-        """Load the corpus persisted under ``path`` (see :meth:`save`)."""
-        if backend == "duckdb":
-            from .duckdb_store import load as _load_db
-            return _load_db(path)
+    def load(cls, path: str) -> "Corpus":
+        """Load the lineage persisted under ``path`` (see :meth:`save`)."""
         c = cls()
         fp = os.path.join(path, "corpus.jsonl")
-        if not os.path.exists(fp):
-            return c
-        chunks: list[Chunk] = []
-        vecs: list[list[float] | None] = []
-        with open(fp) as f:
-            for line in f:
-                if not line.strip():
-                    continue
-                row = json.loads(line)
-                vecs.append(row.pop("vector", None))
-                chunks.append(Chunk(**row))
-        c.add(chunks, None)
-        c.vectors = vecs  # restore vectors positionally
+        if os.path.exists(fp):
+            with open(fp, encoding="utf-8") as f:
+                # Tolerate rows carrying fields Lineage doesn't know (older or
+                # newer stores): drop the extras, keep the lineage. Text is
+                # never stored.
+                fields = set(Lineage.__dataclass_fields__)
+                rows = []
+                for line in f:
+                    if not line.strip():
+                        continue
+                    row = json.loads(line)
+                    rows.append(Lineage(**{k: v for k, v in row.items() if k in fields}))
+                c.add(rows)
         return c
-
-
-
-# Backwards-compatible thin alias for the phase-0 placeholder name.
-VectorIndex = Corpus

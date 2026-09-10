@@ -1,9 +1,10 @@
 """Runtime configuration. Every field is env-overridable with the ``DK_`` prefix
-(e.g. ``DK_BACKEND_URL``, ``DK_PROVIDER``, ``DK_CHAT_MODEL``) or via a local
+(e.g. ``DK_BACKEND_URL``, ``DK_ENGINE_BINARY``, ``DK_CHAT_MODEL``) or via a local
 ``.env`` file.
 
-The local backend is anything that speaks the OpenAI-compatible ``/v1`` API:
-the stock llama.cpp ``llama-server``, or Ollama. That single HTTP contract is the whole backend boundary.
+The engine is mettle — the only supported backend, via its OpenAI-compatible
+``/v1`` plus the collection/management surface. That single HTTP contract is
+the whole backend boundary (cutover contract, 2026-09-10).
 """
 
 from __future__ import annotations
@@ -47,16 +48,9 @@ _ENV_FILE = str(_ROOT / ".env") if _ROOT else str(_CONFIG_DIR / "env")
 _ENV_LOCAL_FILE = str(_ROOT / ".env.local") if _ROOT else str(_CONFIG_DIR / "env.local")
 _DEFAULT_INDEX_DIR = str(_ROOT / ".docket_index") if _ROOT else str(_DATA_DIR / "index")
 
-
 class Profile(str, Enum):
-    lite = "lite"          # embedded, zero-config, any-PDF (simple local install)
+    lite = "lite"          # embedded, any-PDF, engine-backed
     platform = "platform"  # live Kafka/Spark lakehouse ingestion (self-host IaC)
-
-
-class Provider(str, Enum):
-    local = "local"        # OpenAI-/v1 backend: llama-server | Ollama
-    cerebras = "cerebras"  # free-tier API (~1M tok/day)
-    groq = "groq"          # free-tier API (fast)
 
 
 class Settings(BaseSettings):
@@ -65,54 +59,38 @@ class Settings(BaseSettings):
     )
 
     profile: Profile = Profile.lite
-    provider: Provider = Provider.local
-
-    # OpenAI-compatible /v1 base URL for the local backend.
+    # OpenAI-/v1 base URL of the engine (mettle). The ONLY supported backend:
+    # chat, embeddings, rerank and collection search all ride this one base.
     backend_url: str = "http://127.0.0.1:11434/v1"
-    chat_model: str = "gemma4:e2b"  # e2b (not e4b) so chat + embed-gemma + OCR
+    chat_model: str = "gemma4:e2b"  # e2b (not e4b) so chat + embed + OCR
     #                                 co-reside in 6 GB VRAM on an all-in-one
-    #                                 server; stock llama-server ignores this.
+    #                                 engine.
 
-    # Embeddings need a DEDICATED model/endpoint — the shared chat `llama-server`
-    # is NOT started with --embeddings (and a chat model's embeddings are poor
-    # anyway). Default None => embeddings unconfigured and retrieval degrades to
-    # sparse-only (graceful; keeps the backend boundary generic). Point this at a
-    # separate `llama-server --embeddings` (e.g. EmbeddingGemma) via DK_EMBED_URL.
-    # An all-in-one server serves chat+embeddings on one /v1 base — there set
-    # DK_EMBED_URL = DK_BACKEND_URL to turn dense retrieval on.
-    embed_url: str | None = None
-    embed_model: str = "embed-gemma:latest"
-
-    # Cross-encoder reranker over the fused candidates (the dominant FinanceBench
-    # lever — Phase-A sweep: recall@6 0.840 vs 0.527 unreranked, n=150; T26). Same backend
-    # boundary as chat/embed: a POST to the OpenAI-style ``/v1/rerank`` on an
-    # all-in-one server (Cohere shape). Default None => no reranker and the
-    # fused RRF order stands (graceful, offline-safe). Point DK_RERANK_URL at the
-    # ``/v1`` base (e.g. = DK_BACKEND_URL) to turn reranking on; the seam only
-    # uses rank ORDER, never an absolute score, so any served reranker fits.
-    rerank_url: str | None = None
+    # Embeddings and rerank are UNCONDITIONAL engine features — mettle serves
+    # them on the same /v1 base as chat. Only the model aliases are tunable;
+    # qwen3 is the shipped engine default (adoption contract, 2026-09-10).
+    embed_model: str = "qwen3-embedding-0.6b:latest"
     rerank_model: str = "qwen3-reranker-0.6b:latest"
 
-    # BYO keys for the free-tier API providers.
-    cerebras_api_key: str | None = None
-    groq_api_key: str | None = None
-
-    # Bearer for the engine-management surface (/engine/*) of a LOCAL backend.
-    # Set only when the engine enforces auth (mettle can); the /engine probe and
-    # SSE stream use it. Unset => no auth header (the default localhost dev case).
+    # Bearer for the engine (both /v1 and /engine/*). Set only when the engine
+    # enforces auth; unset => no auth header (the default localhost dev case).
     engine_key: str | None = None
+
+    # Engine process supervision (§3 of the cutover contract): docket's backend
+    # owns mettled's lifecycle. Binary path unset => never spawn, only probe.
+    engine_binary: str | None = None   # e.g. ~/.cargo/bin/mettled
+    mettle_config: str | None = None   # METTLE_CONFIG override (config.toml)
 
     request_timeout_s: float = 120.0
 
-    # Lite-profile ingest/retrieval knobs. The persisted corpus (chunks + optional
-    # dense vectors) lives under index_dir; zero-config, embedded.
+    # Ingest/retrieval knobs. The persisted corpus (chunk lineage + doc dedup +
+    # job state, NO chunk text — display text comes back from engine hits)
+    # lives under index_dir; zero-config, embedded.
     index_dir: str = _DEFAULT_INDEX_DIR
-    # Corpus persistence backend. "jsonl" is the lite, zero-config store;
-    # "duckdb" is the platform SQL-backed store (chunks + vectors + lineage).
-    # Unknown values fall back to jsonl at the save/load seam.
-    corpus_store: str = "jsonl"
     chunk_words: int = 220        # target words per chunk
     chunk_overlap: int = 40       # word overlap between adjacent chunks
+    retrieval_mode: str = "hybrid"  # dense | keyword | hybrid (engine modes)
+    engine_collection: str = "docket"  # mettle collection docket ingests into
     retrieval_k: int = 20         # candidates pulled before rerank
     context_chunks: int = 10      # top chunks fed to the model (FinanceBench: 82.0% @10 vs 68.0% @6)
     max_hops: int = 2             # iterative agentic re-query budget
