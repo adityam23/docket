@@ -65,7 +65,10 @@ fn spawn_server(resources: &PathBuf) -> std::io::Result<(Child, u16)> {
     let mettled = resources.join("engine/mettled");
     let mut cmd = Command::new(bin);
     cmd.arg("--port").arg(port.to_string())
-        .env("DK_ENGINE_BINARY", mettled);
+        .env("DK_ENGINE_BINARY", mettled)
+        // Packaged contract: quitting the app kills the engine group (the
+        // sidecar's shutdown hook honours this flag; `dk serve` stays warm).
+        .env("DK_ENGINE_EPHEMERAL", "1");
     // The sidecar is its own session leader: quitting cannot leave the webview
     // pointing at a server orphaned behind an already-exited shell.
     #[cfg(unix)]

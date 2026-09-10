@@ -14,6 +14,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import os
 import queue
 import threading
 from pathlib import Path
@@ -67,10 +68,13 @@ def _start_engine_supervisor() -> None:
 
 @app.on_event("shutdown")
 def _stop_engine_supervisor() -> None:
-    """SIGTERM/SIGINT (uvicorn shutdown, e.g. the desktop shell quitting)
-    must take the spawned engine's process group with it — an orphaned mettled
-    holds its weights in VRAM and OOMs the next launch."""
-    get_supervisor(load_settings()).stop()
+    """SIGTERM/SIGINT (uvicorn shutdown) stops the engine supervisor's process
+    group — but ONLY for the packaged app, which opts in via
+    ``DK_ENGINE_EPHEMERAL=1`` (the Tauri sidecar sets it at spawn). On the dev
+    path (`dk serve`, incl. its --reload restarts) the engine stays warm across
+    reloads: killing mettled per edit would cost a full weight reload."""
+    if os.environ.get("DK_ENGINE_EPHEMERAL") == "1":
+        get_supervisor(load_settings()).stop()
 
 
 _FRONTEND = Path(__file__).parent / "frontend" / "build"

@@ -14,6 +14,8 @@ on:
         default: ""
   push:
     tags: ["v*"]
+  pull_request:
+    paths: ["desktop/src-tauri/**", "packaging/**"]
 
 permissions:
   contents: write
@@ -22,7 +24,31 @@ env:
   METTLE_REPO: adityam23/mettle
 
 jobs:
+  # Cheap gate that runs on PRs and dispatches: the Python suite (incl. the
+  # supervision lifecycle) and a compile-only check of the Rust shell. The
+  # full bundle build stays tag-gated — it needs the mettled release asset.
+  preflight:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Linux prerequisites (Tauri v2 + link check)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential curl wget file \
+            libxdo-dev libssl-dev libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev patchelf
+      - name: Test suite
+        run: uv run pytest -q
+      - name: Supervision lifecycle smoke
+        run: timeout 300 uv run python benchmarks/smoke_supervision.py
+      - name: Rust shell compiles
+        working-directory: desktop/src-tauri
+        run: cargo check
+
   desktop:
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     strategy:
       fail-fast: false
       matrix:
@@ -46,7 +72,9 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+          sudo apt-get install -y build-essential curl wget file \
+            libxdo-dev libssl-dev libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev patchelf
 
       # --- frontend -----------------------------------------------------------
       - name: Build SPA

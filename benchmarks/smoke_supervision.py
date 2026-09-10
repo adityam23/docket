@@ -112,10 +112,13 @@ def main() -> int:
             threading.Thread(target=srv.serve_forever, daemon=True).start()
             time.sleep(3600)
             """))
-    # Python strictly via uv (project rule): the wrapper shims uv around the
-    # engine body. uv is a stable dependency of this repo.
+    # SINGLE PROCESS with the project venv interpreter as shebang: mirrors the
+    # real shape (one mettled binary, supervisor must notice THE SPAWNED PID
+    # dying) and sidesteps `uv run`'s cwd sensitivity — the supervisor runs
+    # children with cwd=dirname(binary). sys.executable here is the uv venv's
+    # python, so invoking python stays uv-managed per the project rule.
     with open(fake, "w") as f:
-        f.write(f"#!/bin/sh\nexec uv run --quiet python {engine_py}\n")
+        f.write(f"#!{sys.executable}\n{open(engine_py).read()}")
     os.chmod(fake, 0o755)
     sup2 = EngineSupervisor(Settings(backend_url=f"http://127.0.0.1:{port}/v1", engine_binary=fake))
     sup2.ensure()
@@ -126,12 +129,12 @@ def main() -> int:
         failures.append("3a: spawn never became available")
         print("[FAIL] 3a:", sup2.view())
 
-    # Crash it: kill the whole process group (the fake engine is a sh→uv→python
-    # chain; a real mettled is a single process — group-kill mirrors both).
+    # Crash it: kill THE SPAWNED PID (real mettled is a single process, and
+    # the fake now is too — the supervisor must notice THE SPAWNED PID dying).
     # First wait for the supervisor to NOTICE (state leaves 'available'), then
     # wait for the respawn to become available again.
     try:
-        os.killpg(os.getpgid(pid1), signal.SIGKILL)
+        os.kill(pid1, signal.SIGKILL)
     except (ProcessLookupError, PermissionError):
         pass
     left_available = wait_state(sup2, "starting", timeout=15.0)

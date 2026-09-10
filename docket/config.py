@@ -80,6 +80,12 @@ class Settings(BaseSettings):
     # owns mettled's lifecycle. Binary path unset => never spawn, only probe.
     engine_binary: str | None = None   # e.g. ~/.cargo/bin/mettled
     mettle_config: str | None = None   # METTLE_CONFIG override (config.toml)
+    # How long a spawned-but-not-yet-answering engine may stay alive before we
+    # treat it as hung (kill the group, count the attempt, respawn). A first
+    # run legitimately downloads GB-scale weights for minutes, hence the long
+    # default — this ceiling exists so a binary that NEVER answers can't hold
+    # "starting" forever.
+    engine_startup_window_s: float = 900.0
 
     request_timeout_s: float = 120.0
 

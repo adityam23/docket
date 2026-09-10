@@ -236,29 +236,42 @@ class EngineSupervisor:
         and kicks the loop; the next probe/spawn cycle decides the state."""
         self.attempts = 0
 
-    def stop(self) -> None:
-        """Stop supervision AND the spawned engine. The engine was spawned in
-        its own session, so the whole tree (mettled + any loader children) is
-        one process group: SIGTERM it, then SIGKILL whatever survived — an
-        orphaned mettled holds its weights in VRAM and OOMs the next launch."""
-        self._stop = True
-        self._wake.set()
-        proc = self._proc
-        if proc is None or proc.poll() is not None:
+    def _kill_group(self, proc: subprocess.Popen) -> None:
+        """SIGTERM the spawned engine's process group, then SIGKILL whatever
+        survived and REAP it. Kept to one implementation because both the
+        shutdown path and the startup-ceiling path need identical semantics.
+        The TERM wait (3 s) is sized so TERM+KILL completes inside uvicorn's
+        graceful-shutdown window — a KILL that never fires is the exact
+        orphan we are preventing (mettled holds VRAM)."""
+        if proc.poll() is not None:
             return
         try:
-            pgid = os.getpgid(proc.pid)
-            os.killpg(pgid, signal.SIGTERM)
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
         except (ProcessLookupError, PermissionError):
             pass
         try:
-            proc.wait(timeout=5.0)
+            proc.wait(timeout=3.0)
+            return
         except subprocess.TimeoutExpired:
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
+            pass
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        try:
+            proc.wait(timeout=5.0)  # reap: no zombie holding the port
+        except subprocess.TimeoutExpired:
+            pass
+
+    def stop(self) -> None:
+        """Stop supervision AND the spawned engine (see :meth:`_kill_group`)."""
+        self._stop = True
         self._wake.set()
+        proc = self._proc
+        self._proc = None
+        self.pid = None
+        if proc is not None:
+            self._kill_group(proc)
 
     def view(self) -> dict:
         """Supervision state for the SPA: honest ``offline/starting/...``."""
@@ -327,6 +340,11 @@ class EngineSupervisor:
 
         # Probe until ready; stay patient while the child lives and keeps
         # starting up (weights download / model load), bail quickly on death.
+        # Ceiling: a child that outlives engine_startup_window_s without ever
+        # answering is hung — kill the group (reaps), count the attempt,
+        # respawn on the next pass. The ceiling is long so a legitimate
+        # first-run download is never misread as a hang.
+        started = time.monotonic()
         while not self._stop:
             if self._probing():
                 with self._lock:
@@ -336,11 +354,17 @@ class EngineSupervisor:
             proc = self._proc
             if proc is None or proc.poll() is not None:
                 break  # child died before answering → genuine attempt failure
+            if time.monotonic() - started > self._settings.engine_startup_window_s:
+                proc = self._proc
+                self._proc = None
+                if proc is not None:
+                    self._kill_group(proc)
+                break
             time.sleep(0.5)
             if self._stop:
                 return
 
-        # Child dead: reap it, back off, retry on the next loop pass.
+        # Child dead (crash) or killed for hanging: back off, retry next pass.
         self._wake.wait(timeout=self._BACKOFF_S[min(self.attempts, len(self._BACKOFF_S)) - 1])
         self._wake.clear()
 

@@ -29,7 +29,12 @@ def main() -> None:
     args = ap.parse_args()
 
     uvicorn.run(web_app, host=args.host, port=args.port, reload=False,
-                log_level="info")
+                log_level="info",
+                # The shell's quit sends SIGTERM; the FastAPI shutdown hook
+                # stops the engine supervisor (TERM 3 s + KILL + reap). Give
+                # uvicorn a window comfortably larger than that so the KILL
+                # always gets its turn — its default truncates the hook.
+                timeout_graceful_shutdown=20)
 
 
 if __name__ == "__main__":
