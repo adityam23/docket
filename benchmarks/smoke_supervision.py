@@ -184,6 +184,42 @@ def main() -> int:
         failures.append(f"5b: slow engine orphaned (pid={v['pid']})")
         print("[FAIL] 5b: slow engine still alive")
 
+    # --- 6. startup ceiling: a child that NEVER answers must not hold
+    # "starting" forever. Short window; the hung group gets killed, the
+    # attempt counts, a fresh child respawns. This is the production path
+    # for a binary that binds nothing.
+    port4 = free_port()
+    hung = os.path.join(tempfile.mkdtemp(), "hung-mettled")
+    with open(hung, "w") as f:
+        f.write("#!/bin/sh\nsleep 600\n")  # alive, never answers
+    os.chmod(hung, 0o755)
+    sup4 = EngineSupervisor(Settings(
+        backend_url=f"http://127.0.0.1:{port4}/v1",
+        engine_binary=hung, engine_startup_window_s=1.5))
+    sup4.ensure()
+    pid4 = None
+    for _ in range(100):  # wait for the first (hung) spawn to exist
+        pid4 = sup4.view()["pid"]
+        if pid4 is not None:
+            break
+        time.sleep(0.1)
+    time.sleep(7.0)  # 1.5 s ceiling + 3 s TERM wait + 1 s backoff + respawn
+    v4 = sup4.view()
+    gone = pid4 is not None and not os.path.exists(f"/proc/{pid4}")
+    if gone and v4["attempts"] >= 2:
+        print(f"[ok] 6: hung child killed past ceiling, attempt counted "
+              f"(pid {pid4} gone, attempts={v4['attempts']})")
+    else:
+        failures.append(f"6: hung engine not handled: pid4={pid4} gone={gone} v={v4}")
+        print("[FAIL] 6:", v4)
+    sup4.stop()
+    time.sleep(1.0)
+    if v4["pid"] is None or not os.path.exists(f"/proc/{v4['pid']}"):
+        print("[ok] 6b: stop() reaped the respawned engine")
+    else:
+        failures.append(f"6b: respawned engine orphaned (pid={v4['pid']})")
+        print("[FAIL] 6b: respawned engine still alive")
+
     print()
     if failures:
         print("FAILURES:", failures)

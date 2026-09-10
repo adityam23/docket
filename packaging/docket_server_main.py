@@ -7,8 +7,16 @@ Contract with the shell (METTLE_ONLY_CUTOVER_CONTRACT.md §8):
   port — never hardcode 8760, a dev `dk serve` may hold it);
 - env carries the resource paths: ``DK_ENGINE_BINARY`` (bundled mettled) and
   optionally ``DK_METTLE_CONFIG``;
-- on SIGTERM/SIGINT (the shell quitting) uvicorn shuts down and the FastAPI
-  shutdown hook stops the engine supervisor, killing mettled's process group.
+- the shell sends SIGTERM on quit; uvicorn's graceful path runs the FastAPI
+  shutdown hook (which stops the engine supervisor, killing mettled's process
+  group — proven by the baked-in smoke in packaging/build-sidecar.sh).
+
+Exit-code note: uvicorn's ``capture_signals`` re-raises a captured SIGTERM
+after the fully graceful shutdown (POSIX killed-by-signal convention), so the
+observed code is 143 in every TERM path — direct or frozen (verified). The
+shell treats any exit on quit as success and falls back to SIGKILL after
+10 s; nothing consumes the code.
+
 The app object is passed directly (not by import string) so PyInstaller's
 static analysis collects the whole docket package.
 """
@@ -30,10 +38,9 @@ def main() -> None:
 
     uvicorn.run(web_app, host=args.host, port=args.port, reload=False,
                 log_level="info",
-                # The shell's quit sends SIGTERM; the FastAPI shutdown hook
-                # stops the engine supervisor (TERM 3 s + KILL + reap). Give
-                # uvicorn a window comfortably larger than that so the KILL
-                # always gets its turn — its default truncates the hook.
+                # The FastAPI shutdown hook stops the engine supervisor
+                # (TERM 3 s + KILL + reap). Give uvicorn a window comfortably
+                # larger than that so the KILL always gets its turn.
                 timeout_graceful_shutdown=20)
 
 

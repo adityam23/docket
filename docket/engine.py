@@ -337,6 +337,17 @@ class EngineSupervisor:
 
         self.attempts += 1
         self._spawn()
+        # stop() may have landed between the budget check and the spawn: kill
+        # the just-spawned engine NOW, or the loop below would exit (its
+        # condition is already false) leaving a fresh mettled orphaned — the
+        # exact VRAM-holding orphan this supervisor exists to prevent.
+        if self._stop:
+            proc = self._proc
+            self._proc = None
+            self.pid = None
+            if proc is not None:
+                self._kill_group(proc)
+            return
 
         # Probe until ready; stay patient while the child lives and keeps
         # starting up (weights download / model load), bail quickly on death.
