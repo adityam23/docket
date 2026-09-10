@@ -16,9 +16,11 @@ loudly. Offline docket is dead (no chat, no retrieval): accepted.
 (RRF-union), OR-mode `mode=keyword`, rerank batching, and qwen3 shipped
 defaults are dependencies of every gate below.
 
-**PWA context.** docket is headed for a PWA desktop app (stack decision belongs
-to a separate grilling/agent). This contract must leave a clean boundary, not
-pre-empt that work (§5).
+**PWA context (superseded 2026-09-10 by operator decision).** The PWA plan was
+**dropped** in the packaging grilling session the same day; see the desktop-shell
+decision record appended at the end of this document. The §5 constraints below
+carried into it unchanged (offline-capable shell, engine supervision owned by
+docket's supervisor, engine config owned by mettle).
 
 ---
 
@@ -121,8 +123,28 @@ under qwen3:
 Delivery report: gate table, deletion list with file/symbol names, deviations.
 
 ## 7. Explicit non-goals
-
 - PWA stack/setup decisions (other agent's grilling; §5 constraints only).
 - Chunker changes (parity substrate frozen).
 - New docket-side caching/indexing of any kind.
 - mettle-side changes of any kind (they belong to the adoption contract).
+
+## 8. Desktop-shell decision record (packaging grilling, 2026-09-10)
+
+Operator decisions, asked-and-answered; the PWA ambition (§ above) is replaced:
+
+| Decision | Answer |
+|---|---|
+| App shell | **Tauri** (Rust shell, OS webview; Electron/pywebview/no-shell rejected) |
+| What ships | App + docket server + bundled `mettled` binary; **model weights download on first run** (mettle owns them — mettle-side contract `agent-docs/ENGINE_FIRST_RUN_SURFACE_CONTRACT.md` in the mettle repo specifies the boot-phase status surface docket needs) |
+| FastAPI delivery | Frozen with PyInstaller as a Tauri **sidecar** (`docket-server`, onefile/onedir); the SPA keeps being served by FastAPI — the webview loads `http://127.0.0.1:<free-port>`; the sidecar binds a **free port** (never hardcode 8760) |
+| Formats | **AppImage + DMG together**; Windows NSIS only if asked |
+| Signing | **Unsigned v1**; macOS carries the one-time right-click-open caveat; real notarization is a later paid decision |
+| Updater | **None in-app** (unsigned can't update signed); app links new GitHub releases; users download/replace manually |
+| Window/tray | **Quit-on-close v1** — no tray; single instance; the sidecar and its engine process group die with the app (supervisor `stop()` kills the group: an orphaned mettled holds VRAM) |
+| First-run model download owner | **mettle** (self-download at boot); docket only surfaces honest state from `/engine/*`; docket-side contract ask lives in the mettle repo's agent-docs |
+| Build/CI | **GitHub Actions matrix only** (ubuntu → AppImage, macOS runner → DMG), unsigned; local Linux build supported for dev; macOS locals set up their own |
+| Legacy paths | `dk` CLI + `install.sh` uv-tool wheel **stay** as the developer/CLI surface; the shell is the end-user install |
+
+Known soft dependency: Tauri on Linux uses the system `webkit2gtk-4.1` — an
+AppImage cannot bundle it, so Fedora users need that package; detect or
+document, don't silently fail.
