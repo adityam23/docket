@@ -48,7 +48,7 @@ def load_samples(
     is configured (otherwise the samples are sparse-only, like any other doc).
     """
     s = settings or load_settings()
-    c = corpus if corpus is not None else Corpus.load(s.index_dir)
+    c = corpus if corpus is not None else Corpus.load(s.index_dir, backend=s.corpus_store)
     want_vectors = embeddings_available(s)
 
     def emit(doc_id: str, stage: str, **info: object) -> None:
@@ -77,5 +77,5 @@ def load_samples(
         c.add(chunks, vectors)
         emit(doc_id, "done", chunks=len(chunks), vectorized=bool(vectors))
 
-    c.save(s.index_dir)
+    c.save(s.index_dir, backend=s.corpus_store)
     return c

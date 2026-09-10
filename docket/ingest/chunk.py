@@ -18,6 +18,12 @@ class Chunk:
     page: int              # 1-based source page
     text: str
     source: str = ""       # original file path
+    # Filing metadata (T22): best-effort identity, empty when unknown.
+    # Citations fall back to doc_id when absent — never invented.
+    form_type: str = ""      # e.g. "10-K", "10-Q", "8-K"
+    company: str = ""        # registrant name
+    ticker: str = ""         # e.g. "MMM"
+    fiscal_period: str = ""  # e.g. "2018", "FY2022", "Q3 2021"
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -42,6 +48,10 @@ def chunk_pages(
     source: str = "",
     words: int = 220,
     overlap: int = 40,
+    form_type: str = "",
+    company: str = "",
+    ticker: str = "",
+    fiscal_period: str = "",
 ) -> list[Chunk]:
     """Chunk a document given as ``[{"page": int, "text": str}, ...]``.
 
@@ -63,6 +73,10 @@ def chunk_pages(
                     page=page_no,
                     text=" ".join(w),
                     source=source,
+                    form_type=form_type,
+                    company=company,
+                    ticker=ticker,
+                    fiscal_period=fiscal_period,
                 )
             )
             n += 1
@@ -77,6 +91,10 @@ def chunk_text(
     source: str = "",
     words: int = 220,
     overlap: int = 40,
+    form_type: str = "",
+    company: str = "",
+    ticker: str = "",
+    fiscal_period: str = "",
 ) -> list[Chunk]:
     """Chunk a single blob of text (single logical page)."""
     return chunk_pages(
@@ -85,4 +103,8 @@ def chunk_text(
         source=source,
         words=words,
         overlap=overlap,
+        form_type=form_type,
+        company=company,
+        ticker=ticker,
+        fiscal_period=fiscal_period,
     )
