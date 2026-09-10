@@ -1,12 +1,14 @@
 # docket
 
-Local RAG engine for long documents: hybrid retrieval, cross-encoder rerank,
-grounded generation, evaluated on FinanceBench.
+Research assistant over SEC EDGAR filings: retrieval, rerank, embeddings and
+grounded generation all live in the **mettle** engine, consumed over its
+OpenAI-compatible `/v1` HTTP API; docket owns the UI, the agent, the lineage
+and the trust layer.
 
-Self-contained. The release wheel ships the dashboard; no engine install, no
-Node, no external services required to start. Works with any OpenAI-compatible
-`/v1` server or a free-tier API key (Cerebras, Groq); the supported engine is
-**mettle**.
+Self-contained. The release wheel ships the dashboard; no Node, no external
+services required to start. The only supported engine is **mettle** — any
+server that speaks the same OpenAI-compatible `/v1` contract (chat with
+per-token logprobs, embeddings, rerank, collections) is a drop-in backend.
 
 ## Install
 
@@ -49,40 +51,40 @@ uv run pytest            # offline suite, no backend needed
 
 Extras: `uv sync --extra ingest` (PDF text extraction), `--extra agent`
 (LangGraph). The dashboard is a SvelteKit (Svelte 5) SPA: rebuild it with
-`cd docket/web/frontend && npm ci && npm run build`; releases ship it prebuilt.
+`cd docket/web/frontend && npm ci && npm run build`; releases
+ship it prebuilt.
 
 ## Configuration
 
-Every knob is a `DK_`-prefixed env var or a line in `.env`. Defaults are safe:
-without an embedding endpoint retrieval degrades to sparse BM25; without a
-reranker the fused RRF order stands. Nothing errors on missing backends.
+Every knob is a `DK_`-prefixed env var or a line in `.env`. All retrieval
+capability is engine-side: the engine serves chat with per-token logprobs,
+embeddings, `/v1/rerank` and the collections surface on ONE base URL — there is
+no separate embed or rerank endpoint. If the engine is unreachable, docket
+features fail loudly (no silent local fallback).
 
 | Variable | Purpose |
 |---|---|
-| `DK_BACKEND_URL` | `/v1` base of any OpenAI-compatible server. Default `http://127.0.0.1:11434/v1` |
-| `DK_CHAT_MODEL` | Model id served there. Default `gemma4:e2b` |
-| `DK_PROVIDER` | `local`, `cerebras`, or `groq` |
-| `DK_CEREBRAS_API_KEY` / `DK_GROQ_API_KEY` | Free-tier keys when `DK_PROVIDER != local` |
-| `DK_EMBED_URL` | Dedicated embeddings endpoint. Unset keeps sparse-only |
-| `DK_RERANK_URL` | Endpoint serving `/v1/rerank` (Cohere shape). Unset disables reranking |
-| `DK_EMBED_MODEL` | Embedding model id served at `DK_EMBED_URL`. Default `embed-gemma:latest` |
-| `DK_RERANK_MODEL` | Reranker model id served at `DK_RERANK_URL`. Default `qwen3-reranker-0.6b:latest` |
+| `DK_BACKEND_URL` | `/v1` base of the mettle engine. Default `http://127.0.0.1:11434/v1` |
+| `DK_CHAT_MODEL` | Chat model id (or `role:<kind>` resolved from the engine's active profile) |
+| `DK_EMBED_MODEL` | Embedding model id used at ingest time |
+| `DK_RERANK_MODEL` | Cross-encoder reranker id. Default `qwen3-reranker-0.6b:latest` |
+| `DK_ENGINE_BINARY` | Path to the `mettled` binary; set to let docket supervise (spawn + crash-restart) it |
+| `DK_METTLE_CONFIG` | Passed to the engine as `METTLE_CONFIG` when spawning |
+| `DK_ENGINE_KEY` | Bearer for the engine-management surface, when the engine enforces auth |
+| `DK_ENGINE_COLLECTION` | Collection name filings are ingested into |
 
 ## How it works
 
 ```
-ingest:  pdf -> ocr -> chunk -> embed -> index (BM25 + optional vectors)
-answer:  query -> hybrid recall -> RRF fusion -> cross-encoder rerank
+ingest:  pdf -> ocr -> chunk -> POST chunks to the engine collection
+answer:  query -> engine search (dense/keyword/hybrid) -> cross-encoder rerank
          -> grounded LLM hops -> cited answer + per-token confidence label
 ```
 
-Stages marked without qualifiers are always on; `ocr`, `embed`, and `rerank`
-activate only when their endpoint is configured, degrading gracefully otherwise.
-
-One `/v1` client talks to every backend. Seams are explicit: `Corpus.dense_search`
-swaps vector stores, `Retriever(reranker=...)` swaps rankers, `Provider` swaps
-llama.cpp for hosted APIs without code changes. Degradation is graceful at each
-step, so the offline test suite runs the full pipeline against fakes.
+docket stores only chunk **lineage** locally (doc ids, pages, sources, filing
+metadata) — chunk text and vectors live engine-side. Search, rerank, embed and
+chat are engine capabilities reached through the one OpenAI-`/v1` client; the
+offline test suite runs the full pipeline against a fake provider.
 
 ## Benchmarks
 

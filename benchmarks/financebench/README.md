@@ -99,31 +99,16 @@ the training reward signal.
 
 Measured on the shipped stack (post-scoring-fix, 2026-08-25): FinanceBench is
 retrieval-bound — oracle ceiling 80.7% vs 68.0% at full-RAG @6 for the distill — so
-the retriever is optimised *before* spending generator tokens, in two phases:
+the retriever was optimised *before* spending generator tokens.
 
-**Phase A — recall sweep (generator-free, deterministic).** `sweep_recall.py`
-measures **gold-evidence recall@k** (token overlap-coefficient of the retrieved
-chunks vs the gold `evidence_text`) across **embedder × reranker**, reusing the
-production `ingest_paths` + `Retriever` + `make_reranker` verbatim — the config
-that wins here is the config that ships.
+> **Cutover note (2026-09-10).** Retrieval lives engine-side now (mettle
+>`/v1`): the docket-local recall-sweep machinery (`sweep_recall.py` and the
+>parity scripts) was **removed** at the mettle-only cutover; their measurement
+>documents (`METTLE_PARITY_CONTRACT.md`, `BEST_CONFIG_CONTRACT.md`, verdict)
+>and results JSONs remain as the historical record. Full-RAG reproduction is
+>`run_full.py --rag` below — retrieval now goes through the engine's collection
+>search + `/v1/rerank` via the production pipeline.
 
-```bash
-uv run python -u benchmarks/financebench/sweep_recall.py \
-    --base-url http://127.0.0.1:11434/v1 \
-    --docs-dir benchmarks/financebench/filings \
-    --out benchmarks/financebench/results/recall_sweep.json      # --limit N to slice
-# embedders: embed-gemma (768d) / bge-m3 / qwen3-embedding-0.6b (1024d)
-# rerankers: none / bge-reranker-v2-m3 / qwen3-reranker-0.6b
-```
-
-It is **crash-recoverable** — a co-tenant may restart the shared backend mid-run:
-every embedded corpus is cached to `.sweep_cache/` (reloaded, never re-embedded),
-results checkpoint to `--out` after each config, and embed/rerank calls wait for
-the backend and retry instead of dying. Re-invoke with the same args to resume.
-A reranker whose model can't load (deterministic CUDA OOM) is recorded in
-`oom_rerankers` in the results JSON and **never retried** (a repeatable OOM is the
-one thing wait-retry must not thrash on). Recall is a *proxy* (it ranks retrieval
-quality; it is not answer accuracy).
 
 > **6 GB VRAM note (2026-08-24).** All three embedders and all three rerankers are
 > sub-1 GB and fit on GPU together — **but only once the 128K-context chat model is
@@ -157,8 +142,7 @@ full-RAG (context = live retrieval instead of gold evidence), Claude-judged as i
 uv run python benchmarks/financebench/run_full.py \
     --base-url <candidate-/v1> --model <id> --rag --gap \
     --docs-dir benchmarks/financebench/filings \
-    --embed-url http://127.0.0.1:11434/v1 --embed-model embed-gemma:latest \
-    --rerank-url http://127.0.0.1:11434/v1 --rerank-model qwen3-reranker-0.6b:latest \
+    --embed-model embed-gemma:latest --rerank-model qwen3-reranker-0.6b:latest \
     --retrieval-k 10 --export results/responses/rag_<name>.jsonl     # shipped k
 ```
 

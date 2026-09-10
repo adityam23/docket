@@ -26,10 +26,11 @@ dk = "docket.cli:main"
 [project.optional-dependencies]
 # uv sync --extra agent   (LangGraph agent + tools)
 agent = ["langgraph>=0.2", "langchain-core>=0.3"]
-# uv sync --extra ingest  (chunking, local index, PDF text — OCR/turbovec added later)
+# uv sync --extra ingest  (chunking, PDF text + filing-metadata extraction)
 # cryptography: pypdf's AES-decrypt backend — some real SEC filings are owner-password
 # encrypted (openable with an empty user password). Broadly-reusable stdlib-grade crypto.
-ingest = ["pypdf>=4.2", "duckdb>=1.0", "rank-bm25>=0.2", "cryptography>=3.1"]
+# (Storage, retrieval and embeddings live engine-side; no local index deps.)
+ingest = ["pypdf>=4.2", "cryptography>=3.1"]
 
 [dependency-groups]
 dev = ["pytest>=8"]

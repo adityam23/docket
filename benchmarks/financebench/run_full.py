@@ -62,30 +62,17 @@ def _print_card(card: Scorecard, items: list[dict], mode: str) -> None:
         print(f"    {qt:<28} {sum(oks)}/{len(oks)}")
 
 
-def _build_retriever_for(docs_dir: str, settings: Settings, *, verbose: bool = True,
-                         corpus_cache: str | None = None):
+def _build_retriever_for(docs_dir: str, settings: Settings, *, verbose: bool = True):
     """Return a cached ``doc_id -> Retriever`` lookup for full-RAG.
 
-    Each filing is ingested into its OWN corpus (FinanceBench questions target a
-    single filing) via the production ingest pipeline, so the finance embedder /
-    reranker configured in ``settings`` are exercised end to end — no parallel
-    retrieval path (CLAUDE.md). A missing PDF yields ``None`` (→ empty context),
-    reported rather than silently faked.
-
-    ``corpus_cache`` (a dir) reuses the Phase-A sweep's per-filing embedded
-    corpora (``sweep_recall._cached_corpus``, keyed by embedder) — so we load the
-    vectors already computed for the recall sweep instead of re-embedding all 84
-    filings, and Phase-B retrieval is byte-identical to what the sweep measured.
-    Missing entries are chunked+embedded on the fly and cached like the sweep."""
+    Each filing is ingested into the engine's collection via the production
+    ingest pipeline and retrieved through the engine, scoped to that filing's
+    chunks via the search allowlist (post-cutover: search lives engine-side;
+    FinanceBench questions target a single filing). A missing PDF yields
+    ``None`` (→ empty context), reported rather than silently faked."""
     from docket.ingest.index import Corpus
     from docket.ingest.pipeline import ingest_paths
     from docket.service import load_retriever
-
-    cached_corpus = None
-    if corpus_cache:
-        sys.path.insert(0, str(Path(__file__).resolve().parent))
-        from sweep_recall import _cached_corpus  # reuse the sweep's cache (one impl)
-        cached_corpus = _cached_corpus
 
     cache: dict[str, object] = {}
     missing: set[str] = set()
@@ -100,15 +87,10 @@ def _build_retriever_for(docs_dir: str, settings: Settings, *, verbose: bool = T
                 print(f"  [full-RAG] missing filing PDF for {doc_id}: {pdf}")
             cache[doc_id] = None
             return None
-        if cached_corpus is not None:
-            corpus = cached_corpus(doc_id, pdf, settings, Path(corpus_cache), settings.embed_model)
-        else:
-            corpus = ingest_paths([str(pdf)], settings=settings, corpus=Corpus())
-        retriever = load_retriever(settings, corpus=corpus)
-        cache[doc_id] = retriever
+        corpus = ingest_paths([str(pdf)], settings=settings, corpus=Corpus())
+        retriever = load_retriever(settings, corpus=corpus, scope_doc=doc_id)
         if verbose:
-            print(f"  [full-RAG] {doc_id}: {len(corpus)} chunks"
-                  f"{' (cached)' if cached_corpus is not None else ''}")
+            print(f"  [full-RAG] {doc_id}: {len(corpus)} chunks")
         return retriever
 
     return retriever_for
@@ -132,6 +114,28 @@ def _done_ids(path: str) -> set:
     return done
 
 
+def _resilient(fn, base_url: str, what: str, *, tries: int = 8):
+    """Retry a backend call through transient 5xx / transport blips (the
+    engine may be restarting under us). A persistent failure re-raises so the
+    row stays un-done for resume."""
+    import httpx
+    import time as _t
+
+    last: Exception | None = None
+    for attempt in range(tries):
+        try:
+            return fn()
+        except Exception as e:  # noqa: BLE001 — classify below
+            retryable = isinstance(e, (httpx.TransportError, httpx.HTTPStatusError))
+            last = e
+            if not retryable or attempt == tries - 1:
+                raise
+            wait = min(2.0 * (attempt + 1), 10.0)
+            print(f"  [{what}] {type(e).__name__} (attempt {attempt + 1}); retry in {wait:.0f}s")
+            _t.sleep(wait)
+    raise last  # pragma: no cover
+
+
 def _dump_contexts(items, retrieve, out_path: str, *, base_url: str) -> None:
     """Run retrieval ONCE for every item and persist the hits to JSONL.
 
@@ -142,15 +146,12 @@ def _dump_contexts(items, retrieve, out_path: str, *, base_url: str) -> None:
     these are byte-for-byte the hits live retrieval produced). One retrieval pass
     feeds every generator instead of re-retrieving per model.
 
-    Crash-recoverable like the Phase-A sweep: each item is retrieved through the
-    shared ``_resilient`` wrapper (waits for the shared backend to come back after
-    a restart, then retries), and completed ids are skipped on resume, so a
-    backend death mid-run (observed on a big-filing rerank) never loses progress
+    Crash-recoverable: each item is retrieved through the ``_resilient``
+    wrapper (retries while the supervisor brings the engine back), and completed
+    ids are skipped on resume, so a backend death mid-run never loses progress
     or restarts from zero."""
     import json
 
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from sweep_recall import _resilient  # reuse the sweep's backend-wait+retry
 
     done = _done_ids(out_path)
     todo = [it for it in items if it["id"] not in done]
@@ -194,9 +195,8 @@ def _cached_retrieve(path: str):
 
 class _ResilientProvider:
     """Wrap a provider so ``.chat`` survives a backend restart: on a disconnect it
-    waits for the (watchdog-relaunched) backend and retries, instead of yielding an
-    ``[error]`` row. Reuses the sweep's ``_resilient`` — one retry policy for the
-    whole benchmark. Transparent for everything else (name, etc.)."""
+    retries while the supervisor restarts the engine, instead of yielding an
+    ``[error]`` row. Transparent for everything else (name, etc.)."""
 
     def __init__(self, inner, base_url: str):
         self._inner = inner
@@ -207,8 +207,6 @@ class _ResilientProvider:
         return getattr(self._inner, key)
 
     def chat(self, *args, **kwargs):
-        sys.path.insert(0, str(Path(__file__).resolve().parent))
-        from sweep_recall import _resilient
         return _resilient(lambda: self._inner.chat(*args, **kwargs), self._base_url, "chat")
 
 
@@ -296,13 +294,9 @@ def main() -> None:
     ap.add_argument("--rag", action="store_true", help="full-RAG mode (live retrieval)")
     ap.add_argument("--gap", action="store_true", help="with --rag, also run oracle and print the gap")
     ap.add_argument("--docs-dir", help="folder of <doc_id>.pdf filings (required for --rag)")
-    ap.add_argument("--embed-url", help="/v1 base serving the finance embedder")
     ap.add_argument("--embed-model", default="bge-m3:latest")
-    ap.add_argument("--rerank-url", help="/v1 base serving the cross-encoder reranker")
     ap.add_argument("--rerank-model", default="qwen3-reranker-0.6b:latest")
     ap.add_argument("--retrieval-k", type=int, default=6, help="chunks fed as context in full-RAG")
-    ap.add_argument("--corpus-cache", help="reuse the Phase-A sweep's per-filing embedded corpora "
-                    "(dir, e.g. benchmarks/financebench/.sweep_cache) instead of re-embedding")
     ap.add_argument("--dump-contexts", help="with --rag: retrieve every item ONCE and write the "
                     "hits to this JSONL (no generation), so generators can reuse them via --contexts")
     ap.add_argument("--contexts", help="generate/score using contexts previously dumped by "
@@ -342,12 +336,10 @@ def main() -> None:
         mode = "full-RAG"
         s = Settings(
             backend_url=args.base_url,
-            embed_url=args.embed_url or args.base_url,
             embed_model=args.embed_model,
-            rerank_url=args.rerank_url,
             rerank_model=args.rerank_model,
         )
-        retriever_for = _build_retriever_for(args.docs_dir, s, corpus_cache=args.corpus_cache)
+        retriever_for = _build_retriever_for(args.docs_dir, s)
         retrieve = make_rag_retrieve(retriever_for, k=args.retrieval_k)
         if args.dump_contexts:
             _dump_contexts(items, retrieve, args.dump_contexts, base_url=args.base_url)
