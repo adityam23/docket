@@ -90,10 +90,11 @@ def main() -> int:
 
     # --- 3. configured binary: spawn, crash, respawn -----------------------------
     port = free_port()
-    fake = os.path.join(tempfile.mkdtemp(), "fake-mettled")
-    with open(fake, "w") as f:
+    tmp = tempfile.mkdtemp()
+    engine_py = os.path.join(tmp, "fake_engine.py")
+    fake = os.path.join(tmp, "fake-mettled")
+    with open(engine_py, "w") as f:
         f.write(textwrap.dedent(f"""\
-            #!/usr/bin/env python3
             import http.server, threading, time
 
             class H(http.server.BaseHTTPRequestHandler):
@@ -111,6 +112,10 @@ def main() -> int:
             threading.Thread(target=srv.serve_forever, daemon=True).start()
             time.sleep(3600)
             """))
+    # Python strictly via uv (project rule): the wrapper shims uv around the
+    # engine body. uv is a stable dependency of this repo.
+    with open(fake, "w") as f:
+        f.write(f"#!/bin/sh\nexec uv run --quiet python {engine_py}\n")
     os.chmod(fake, 0o755)
     sup2 = EngineSupervisor(Settings(backend_url=f"http://127.0.0.1:{port}/v1", engine_binary=fake))
     sup2.ensure()
@@ -121,12 +126,13 @@ def main() -> int:
         failures.append("3a: spawn never became available")
         print("[FAIL] 3a:", sup2.view())
 
-    # Crash it: SIGKILL the spawned child. First wait for the supervisor to
-    # NOTICE (state leaves 'available' — the in-flight probe window is up to
-    # ~2s), then wait for the respawn to become available again.
+    # Crash it: kill the whole process group (the fake engine is a sh→uv→python
+    # chain; a real mettled is a single process — group-kill mirrors both).
+    # First wait for the supervisor to NOTICE (state leaves 'available'), then
+    # wait for the respawn to become available again.
     try:
-        os.kill(pid1, signal.SIGKILL)
-    except ProcessLookupError:
+        os.killpg(os.getpgid(pid1), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
         pass
     left_available = wait_state(sup2, "starting", timeout=15.0)
     if left_available and wait_state(sup2, "available", timeout=60.0):

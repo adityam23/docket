@@ -1,0 +1,24 @@
+[package]
+name = "docket-desktop"
+version = "0.2.0"
+description = "docket — SEC EDGAR filings research assistant (desktop shell)"
+edition = "2021"
+
+# The Rust layer is deliberately thin (METTLE_ONLY_CUTOVER_CONTRACT.md §8):
+# spawn the frozen docket-server sidecar on a free port, wait for health,
+# point the OS webview at it, and take the whole process tree down on quit.
+# Everything interesting (engine supervision, first-run states) lives in the
+# Python sidecar — the shell adds no product logic.
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-single-instance = "2"
+libc = "0.2"
+parking_lot = "0.12"
+
+[profile.release]
+strip = true
+lto = true

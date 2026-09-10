@@ -39,6 +39,28 @@ curl -fsSL https://raw.githubusercontent.com/adityam23/docket/main/uninstall.sh 
 sh uninstall.sh          # add --data to also delete the ingested index
 ```
 
+## Desktop app (AppImage / DMG)
+Click-to-run builds are produced by CI (`.github/workflows/release-desktop.yml`,
+on version tags): a thin Tauri shell spawns the frozen `docket-server` sidecar
+on a free port, points it at the bundled `mettled` engine, and opens the OS
+webview at the dashboard. Model weights are downloaded by the engine on first
+run (mettle's own first-run flow). Artifacts are **unsigned** by design:
+macOS shows a one-time right-click → Open warning; Linux AppImages need
+`libfuse2` (or run with `--appimage-extract`) and the system
+`webkit2gtk-4.1` webview.
+
+Local Linux build (everything except the engine binary, which you point at via
+`DK_ENGINE_BINARY`):
+
+```sh
+packaging/build-sidecar.sh                       # PyInstaller sidecar → dist/docket-server/
+cp -a dist/docket-server desktop/src-tauri/resources/server/
+mkdir -p desktop/src-tauri/resources/engine      # put (or symlink) a mettled binary here
+cd desktop/src-tauri && npx --yes @tauri-apps/cli build
+```
+
+The CLI/uv-tool install below remains the developer path.
+
 ## Quickstart (dev)
 
 ```sh

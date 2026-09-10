@@ -65,6 +65,14 @@ def _start_engine_supervisor() -> None:
     get_supervisor(load_settings()).ensure()
 
 
+@app.on_event("shutdown")
+def _stop_engine_supervisor() -> None:
+    """SIGTERM/SIGINT (uvicorn shutdown, e.g. the desktop shell quitting)
+    must take the spawned engine's process group with it — an orphaned mettled
+    holds its weights in VRAM and OOMs the next launch."""
+    get_supervisor(load_settings()).stop()
+
+
 _FRONTEND = Path(__file__).parent / "frontend" / "build"
 
 

@@ -31,6 +31,12 @@ benchmarks/financebench/filings/
 # Runtime index & uploads (never publish corpus/traces)
 .docket_index/
 
+# Desktop shell build artifacts (CI builds these; never publish)
+desktop/src-tauri/target/
+desktop/src-tauri/resources/
+desktop/src-tauri/gen/
+release/
+
 # Agent/harness state — never publish
 .omp/
 .claude/
