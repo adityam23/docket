@@ -359,6 +359,78 @@ def test_chats_endpoints(monkeypatch):
     assert client.delete("/api/chats/chat-a").status_code == 404
 
 
+# --- B5: Host/Origin protection (DNS rebinding + CSRF) -----------------------
+
+
+def test_foreign_host_header_is_rejected():
+    # A DNS-rebound hostname pointed at 127.0.0.1 must not be served.
+    client = TestClient(webapp.app)
+    r = client.get("/api/health", headers={"host": "evil.example.com"})
+    assert r.status_code == 400
+
+
+def test_loopback_host_headers_pass(monkeypatch):
+    monkeypatch.setattr(webapp, "health_service", lambda: {"ok": True})
+    client = TestClient(webapp.app)
+    for host in ("127.0.0.1", "127.0.0.1:8760", "localhost", "localhost:8760"):
+        r = client.get("/api/health", headers={"host": host})
+        assert r.status_code == 200, host
+
+
+def test_cross_site_origin_on_patch_config_is_rejected():
+    # CSRF: the request targets this server correctly (Host is fine) but was
+    # declared by a different site -- must be blocked before it ever reaches
+    # update_config.
+    client = TestClient(webapp.app)
+    r = client.patch(
+        "/api/config",
+        json={"updates": {}},
+        headers={"origin": "http://evil.example.com"},
+    )
+    assert r.status_code == 403
+
+
+def test_cross_site_sec_fetch_site_without_origin_is_rejected():
+    # Falls back to Sec-Fetch-Site when Origin is absent.
+    client = TestClient(webapp.app)
+    r = client.post("/api/engine/restart", headers={"sec-fetch-site": "cross-site"})
+    assert r.status_code == 403
+
+
+def test_ask_stream_cross_site_get_is_rejected():
+    # GET but side-effecting (inference + a persisted trace) -> guarded like a
+    # state-changing request.
+    client = TestClient(webapp.app)
+    r = client.get(
+        "/api/ask/stream",
+        params={"question": "q"},
+        headers={"origin": "http://evil.example.com"},
+    )
+    assert r.status_code == 403
+
+
+def test_same_origin_patch_config_passes(monkeypatch):
+    monkeypatch.setattr(webapp, "update_config", lambda updates: None)
+    monkeypatch.setattr(webapp, "config_view", lambda: {"chat_model": "m"})
+    client = TestClient(webapp.app)
+    r = client.patch(
+        "/api/config",
+        json={"updates": {"chat_model": "m"}},
+        headers={"origin": "http://testserver"},
+    )
+    assert r.status_code == 200
+
+
+def test_absent_origin_and_sec_fetch_site_passes(monkeypatch):
+    # curl / the CLI / TestClient's default: no browser is enforcing
+    # same-origin for these callers, so there is no signal to check.
+    monkeypatch.setattr(webapp, "update_config", lambda updates: None)
+    monkeypatch.setattr(webapp, "config_view", lambda: {"chat_model": "m"})
+    client = TestClient(webapp.app)
+    r = client.patch("/api/config", json={"updates": {"chat_model": "m"}})
+    assert r.status_code == 200
+
+
 def test_chat_create_endpoint(monkeypatch):
     class _Store:
         def next_id(self, now):

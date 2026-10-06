@@ -17,6 +17,7 @@ import shutil
 from dataclasses import dataclass
 
 from ..config import Settings, load_settings
+from ..config_write import secret_status
 from ..ingest.index import Corpus
 
 # Keep this much disk free — never let ingestion fill the device (honest about
@@ -190,7 +191,7 @@ def config_view(settings: Settings | None = None) -> dict:
         "chat_model": s.chat_model,
         "embed_model": s.embed_model,
         "rerank_model": s.rerank_model,
-        "api_keys": {"engine": bool(s.engine_key)},
+        "api_keys": secret_status(),
         "retrieval": {
             "chunk_words": s.chunk_words,
             "chunk_overlap": s.chunk_overlap,

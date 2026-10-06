@@ -18,11 +18,13 @@ import os
 import queue
 import threading
 from pathlib import Path
+from urllib.parse import urlsplit
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from ..agent.trace import compact_step, hit_view
 from ..config import load_settings
@@ -56,6 +58,63 @@ _MAX_FILE_BYTES = 50 * 1024 * 1024
 _MAX_UPLOAD_BYTES = 200 * 1024 * 1024
 
 app = FastAPI(title="docket", version="0.2.0")
+
+
+# --- Host/Origin protection (DNS rebinding + CSRF) ---------------------------
+#
+# The server binds 127.0.0.1 only, but that does not stop a browser tab on any
+# other site from reaching it: DNS rebinding points an attacker-controlled
+# hostname at 127.0.0.1 (defeats "it's localhost, nothing else can see it"),
+# and even without rebinding a plain cross-site request can still hit a
+# body-less endpoint (a cross-site <form> needs no JS to POST) or a plain GET
+# (an <img>/fetch triggers `GET /api/ask/stream` — inference plus a persisted
+# trace). Two independent checks, both needed, kept as ONE implementation each
+# rather than duplicated per endpoint:
+#
+# 1. TrustedHostMiddleware pins the Host header to this server's real loopback
+#    names. A rebound hostname fails here, before any route runs — closing the
+#    vector that would otherwise let a rebinding page ride this server's
+#    forwarded ``Authorization: Bearer <engine_key>`` to the engine.
+# 2. `_csrf_guard` rejects state-changing requests (every method but
+#    GET/HEAD/OPTIONS, plus the side-effecting `GET /api/ask/stream`) whose
+#    declared origin is cross-site. It prefers the `Origin` header (sent by
+#    every browser cross-origin fetch/form-post); when `Origin` is absent it
+#    falls back to `Sec-Fetch-Site`. Both headers absent is treated as
+#    same-origin: that combination is curl/the CLI/TestClient, not a browser
+#    — nothing is enforcing same-origin on those callers for an attacker page
+#    to spoof, so there is no signal to check.
+#
+# TestClient's default Host is "testserver" — not a real loopback name, so it
+# would otherwise fail check 1 for the whole existing test suite. Tests opt it
+# into the allowlist via DOCKET_TEST_TRUSTED_HOST, set once at collection time
+# by tests/conftest.py (before any test module imports this module and bakes
+# the middleware's allowed_hosts) — deliberately not a `DK_` Settings field, so
+# production's allowlist is never configurable away from the real loopback set.
+_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+# A safe method that is nonetheless side-effecting (runs inference, persists a
+# trace) and so needs the same cross-site guard as a state-changing method.
+_CSRF_GUARDED_SAFE_PATHS = frozenset({"/api/ask/stream"})
+
+
+def _is_cross_site(request: Request) -> bool:
+    origin = request.headers.get("origin")
+    if origin:
+        return urlsplit(origin).netloc != request.headers.get("host", "")
+    return request.headers.get("sec-fetch-site") == "cross-site"
+
+
+@app.middleware("http")
+async def _csrf_guard(request: Request, call_next):
+    guarded = request.method not in _SAFE_METHODS or request.url.path in _CSRF_GUARDED_SAFE_PATHS
+    if guarded and _is_cross_site(request):
+        return PlainTextResponse("cross-site request blocked", status_code=403)
+    return await call_next(request)
+
+
+_allowed_hosts = ["127.0.0.1", "localhost", "::1", "[::1]"]
+if _test_host := os.environ.get("DOCKET_TEST_TRUSTED_HOST"):
+    _allowed_hosts.append(_test_host)
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=_allowed_hosts)
 
 
 @app.on_event("startup")

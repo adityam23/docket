@@ -10,10 +10,22 @@ the whole backend boundary (cutover contract, 2026-09-10).
 from __future__ import annotations
 
 import os
+import sys
 from enum import Enum
 from pathlib import Path
+from typing import Literal
 
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Mettle's own collection-name contract (adoption contract, 2026-09-10): alnum
+# plus ``. _ -``, 1-128 chars, never leading with a dot. Validated here too so
+# a bad name is rejected at the config boundary instead of 404ing against the
+# engine on the next ask. Written without look-around: pydantic-core's regex
+# engine (Rust `regex` crate) does not support ``(?!...)`` — so "no leading
+# dot" is instead expressed by excluding ``.`` from the first character's own
+# class, with the full ``. _ -`` set allowed only from the second character on.
+_COLLECTION_NAME_PATTERN = r"^[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}$"
 
 
 def _project_root() -> Path | None:
@@ -27,6 +39,14 @@ def _project_root() -> Path | None:
     for an installed (wheel) copy — then state falls back to XDG dirs, which
     env vars can still override.
     """
+    if getattr(sys, "frozen", False):
+        # A PyInstaller build's __file__ lives under sys._MEIPASS, not the
+        # checkout. If the frozen binary happens to run from inside the repo's
+        # own dist/ dir, the parent walk below would still find the repo's
+        # pyproject.toml and silently adopt the developer's .env/.env.local/
+        # .docket_index — a packaged app must never see checkout-local state,
+        # so a frozen process always falls back to XDG dirs.
+        return None
     for parent in Path(__file__).resolve().parents:
         if (parent / "pyproject.toml").is_file():
             return parent
@@ -85,21 +105,38 @@ class Settings(BaseSettings):
     # run legitimately downloads GB-scale weights for minutes, hence the long
     # default — this ceiling exists so a binary that NEVER answers can't hold
     # "starting" forever.
-    engine_startup_window_s: float = 900.0
+    engine_startup_window_s: float = Field(900.0, gt=0)
 
-    request_timeout_s: float = 120.0
+    request_timeout_s: float = Field(120.0, gt=0)
 
     # Ingest/retrieval knobs. The persisted corpus (chunk lineage + doc dedup +
     # job state, NO chunk text — display text comes back from engine hits)
     # lives under index_dir; zero-config, embedded.
     index_dir: str = _DEFAULT_INDEX_DIR
-    chunk_words: int = 220        # target words per chunk
-    chunk_overlap: int = 40       # word overlap between adjacent chunks
-    retrieval_mode: str = "hybrid"  # dense | keyword | hybrid (engine modes)
-    engine_collection: str = "docket"  # mettle collection docket ingests into
-    retrieval_k: int = 20         # candidates pulled before rerank
-    context_chunks: int = 10      # top chunks fed to the model (FinanceBench: 82.0% @10 vs 68.0% @6)
-    max_hops: int = 2             # iterative agentic re-query budget
+    chunk_words: int = Field(220, ge=1)   # target words per chunk (frozen parity
+    #   substrate — env-only developer config, not web-writable)
+    chunk_overlap: int = Field(40, ge=0)  # word overlap between adjacent chunks;
+    #   must be < chunk_words (see the model validator below)
+    retrieval_mode: Literal["dense", "keyword", "hybrid"] = "hybrid"  # engine modes
+    engine_collection: str = Field("docket", pattern=_COLLECTION_NAME_PATTERN)
+    #   mettle collection docket ingests into
+    retrieval_k: int = Field(40, ge=1)    # candidates pulled before rerank — the
+    #   retriever still hard-codes 40 today regardless of this field (a separate
+    #   ticket wires it through); this default now matches that hard-coded value
+    #   so the knob is at least honest until it is live.
+    context_chunks: int = Field(10, ge=1)  # top chunks fed to the model
+    #   (FinanceBench: 82.0% @10 vs 68.0% @6)
+    max_hops: int = Field(2, ge=1)        # iterative agentic re-query budget
+
+    @model_validator(mode="after")
+    def _validate_chunk_overlap(self) -> "Settings":
+        if self.chunk_overlap >= self.chunk_words:
+            raise ValueError(
+                f"chunk_overlap ({self.chunk_overlap}) must be less than "
+                f"chunk_words ({self.chunk_words})"
+            )
+        return self
+
 
 def load_settings() -> Settings:
     return Settings()

@@ -8,7 +8,11 @@ Security (CLAUDE.md — secrets are first-class):
 - The file is written ``0600`` (it may hold API keys).
 - Only an allowlist of keys is writable; unknown keys are rejected.
 - Values are type-validated through the real ``Settings`` model before landing.
-- Values may not contain newlines (no ``KEY=…\\nINJECTED=…`` line injection).
+- Values may not contain newlines (no ``KEY=…\\nINJECTED=…`` line injection) or
+  ``${`` (python-dotenv expands it unconditionally and it cannot be escaped).
+- Every value is single-quoted on write (``_quote_env_value``) so python-dotenv
+  (what pydantic-settings reads this file with) never treats it as a comment,
+  a second quote style, or a shell-interpolated token.
 - Secrets are never read back out — the read models keep redacting them to bools.
 
 One writer, reused by the knobs endpoint and the keys endpoint (no second
@@ -25,19 +29,23 @@ from .config import _ENV_LOCAL_FILE, Settings, load_settings
 
 # Non-secret runtime settings the Settings page may change. Names are the
 # ``Settings`` field names; persisted as ``DK_<UPPER>`` with pydantic's prefix.
+#
+# ``embed_model``, ``chunk_words`` and ``chunk_overlap`` are deliberately NOT
+# here even though they are ``Settings`` fields: ``chunk_words``/``chunk_overlap``
+# (220/40) are a frozen parity substrate (changing them would silently shift
+# every future ingest's chunk boundaries relative to past ones), and
+# ``embed_model`` only affects the offline ``dk embed`` path, not anything the
+# dashboard drives live. They stay env-only developer config.
 WRITABLE_FIELDS: frozenset[str] = frozenset(
     {
         "backend_url",
         "chat_model",
-        "embed_model",
         "rerank_model",
         "retrieval_mode",
         "engine_collection",
         "engine_binary",
         "mettle_config",
         "request_timeout_s",
-        "chunk_words",
-        "chunk_overlap",
         "retrieval_k",
         "context_chunks",
         "max_hops",
@@ -56,22 +64,73 @@ class ConfigWriteError(ValueError):
 
 
 def _envstr(value: object) -> str:
-    """Serialise a validated Settings value to a ``.env`` scalar."""
+    """Validate + stringify a Settings value to its RAW logical form (never
+    quoted here — quoting is ``_write_env_local``'s one job, so there is a
+    single place that knows the on-disk encoding).
+
+    Two guards, both because this is what python-dotenv (what pydantic-settings
+    reads ``.env.local`` with) does on the read side, verified against the
+    installed parser:
+    - no newlines: a bare ``\\n``/``\\r`` would start a second, attacker-chosen
+      line (``KEY=a\\nINJECTED=1``) — classic line-injection guard.
+    - no ``${``: python-dotenv POSIX-expands ``${NAME}`` / ``${NAME:-default}``
+      UNCONDITIONALLY, even inside single quotes — quoting does not protect it
+      (confirmed: ``'${HOME}'`` reads back as the *expanded* value, same as
+      unquoted or double-quoted). There is no escape that survives it either
+      (a backslash before ``${`` is left as a literal character, the expansion
+      still fires). A value containing it would silently read back as something
+      else entirely next launch, so it is rejected outright rather than quietly
+      corrupted.
+    """
     if isinstance(value, Enum):
         value = value.value
     s = str(value)
     if "\n" in s or "\r" in s:
         raise ConfigWriteError("values may not contain newlines")
+    if "${" in s:
+        raise ConfigWriteError(
+            "values may not contain '${' — python-dotenv expands it unconditionally "
+            "(even single-quoted) and it cannot be escaped"
+        )
     return s
 
 
-def _read_env_local() -> dict[str, str]:
-    """Parse the existing ``.env.local`` into a dict (empty if absent).
+def _quote_env_value(value: str) -> str:
+    """Single-quote ``value`` for a ``.env.local`` line, escaping it exactly as
+    python-dotenv's single-quote decoder expects so the round trip is byte-exact.
 
-    Deliberately minimal — we only ever wrote it ourselves (plain ``KEY=value``
-    lines, no quoting/interpolation), so a full dotenv parser is unwarranted.
-    Comments and blanks are preserved by being dropped from the dict and never
-    re-emitted; this file is machine-owned, so that is fine.
+    Verified against the installed parser (``dotenv/parser.py``): inside single
+    quotes, only ``\\\\`` -> ``\\`` and ``\\'`` -> ``'`` are decoded (any other
+    backslash sequence passes through literally) — so backslashes must be
+    escaped FIRST, then quotes, or an escape introduced for a quote could be
+    re-escaped by the backslash pass. Single-quoting (vs. double/unquoted) is
+    what stops python-dotenv from treating a trailing `` #comment`` as a
+    comment, from erroring on an embedded ``"``, and from re-interpreting ``=``
+    or whitespace — the three failure modes this format replaces.
+    """
+    escaped = value.replace("\\", "\\\\").replace("'", "\\'")
+    return f"'{escaped}'"
+
+
+def _unquote_env_value(raw: str) -> str:
+    """Reverse of ``_quote_env_value`` — every line this module has ever
+    written is single-quoted, so ``raw`` is always ``'...'``. Unescape in the
+    opposite order to the writer (quotes, then backslashes). Falls back to the
+    literal text for a line that somehow isn't quoted (defensive only; nothing
+    in this module writes that)."""
+    if len(raw) >= 2 and raw.startswith("'") and raw.endswith("'"):
+        inner = raw[1:-1]
+        return inner.replace("\\'", "'").replace("\\\\", "\\")
+    return raw
+
+
+def _read_env_local() -> dict[str, str]:
+    """Parse the existing ``.env.local`` into ``{key: raw logical value}``
+    (empty if absent). Deliberately minimal line scanning (we only ever wrote
+    it ourselves) but DOES understand the single-quoted value format this
+    module writes, via ``_unquote_env_value`` — so a value round-trips through
+    read-modify-write (e.g. updating one field while carrying the rest forward)
+    without ever double-quoting or corrupting an untouched key.
     """
     out: dict[str, str] = {}
     try:
@@ -81,14 +140,15 @@ def _read_env_local() -> dict[str, str]:
                 if not line or line.startswith("#") or "=" not in line:
                     continue
                 k, _, v = line.partition("=")
-                out[k.strip()] = v.strip()
+                out[k.strip()] = _unquote_env_value(v.strip())
     except FileNotFoundError:
         pass
     return out
 
 
 def _write_env_local(env: dict[str, str]) -> None:
-    """Atomically rewrite ``.env.local`` from ``env`` with 0600 perms.
+    """Atomically rewrite ``.env.local`` from ``env`` (raw logical values —
+    quoting happens here, the one place that applies it) with 0600 perms.
 
     Written to a sibling temp file then ``os.replace``d in, so a crash mid-write
     never leaves a half-written secrets file. Created 0600 from the start (never
@@ -100,7 +160,7 @@ def _write_env_local(env: dict[str, str]) -> None:
     body = (
         "# Machine-local overrides written by the dashboard (Settings + API keys).\n"
         "# Layers over .env; gitignored; do not commit. Edit via the app.\n"
-        + "".join(f"{k}={v}\n" for k, v in sorted(env.items()))
+        + "".join(f"{k}={_quote_env_value(v)}\n" for k, v in sorted(env.items()))
     )
     d = os.path.dirname(_ENV_LOCAL_FILE) or "."
     os.makedirs(d, exist_ok=True)
@@ -119,28 +179,32 @@ def _write_env_local(env: dict[str, str]) -> None:
 def update_config(updates: dict[str, object]) -> None:
     """Persist non-secret runtime settings. Rejects unknown keys and bad types.
 
-    Type-validates by constructing a real ``Settings`` (init kwargs take priority
-    and are validated); the rest of the model loads normally, so we only read
-    back the fields we set. Clearing a value (None/"") removes the override.
+    Clearing a value (None/"") removes the override and falls back to .env /
+    the field default — it is never itself type/pattern-validated (an empty
+    string is the "unset" sentinel, not a candidate value for e.g.
+    ``engine_collection``'s non-empty collection-name pattern). Every value
+    actually being SET is type-validated by constructing a real ``Settings``
+    (init kwargs take priority and are validated; the rest of the model loads
+    normally, so only the fields being set need to round-trip through it).
     """
     if not updates:
         return
     unknown = set(updates) - WRITABLE_FIELDS
     if unknown:
         raise ConfigWriteError(f"unknown or read-only setting(s): {', '.join(sorted(unknown))}")
+
+    clears = {field for field, val in updates.items() if val is None or val == ""}
+    sets = {field: val for field, val in updates.items() if field not in clears}
     try:
-        validated = Settings(**updates)  # type: ignore[arg-type]
+        validated = Settings(**sets)  # type: ignore[arg-type]
     except ValidationError as e:
         raise ConfigWriteError(_short_validation(e)) from e
 
     env = _read_env_local()
-    for field in updates:
-        env_key = f"{_PREFIX}{field.upper()}"
-        val = getattr(validated, field)
-        if val is None or val == "":
-            env.pop(env_key, None)  # unset -> fall back to .env / default
-        else:
-            env[env_key] = _envstr(val)
+    for field in clears:
+        env.pop(f"{_PREFIX}{field.upper()}", None)
+    for field in sets:
+        env[f"{_PREFIX}{field.upper()}"] = _envstr(getattr(validated, field))
     _write_env_local(env)
 
 
