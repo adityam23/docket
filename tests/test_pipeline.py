@@ -19,87 +19,15 @@ from docket.agent.tools import (
 from docket.config import Settings
 from docket.ingest.chunk import chunk_pages, chunk_text
 from docket.ingest.index import Corpus
-from docket.providers.base import Capability, ChatResult
+from docket.providers.base import ChatResult
 from docket.report.render import to_markdown
-from docket.retrieval.retriever import Retriever
 
-
-# --- fakes ------------------------------------------------------------------
-
-class FakeProvider:
-    name = "fake"
-    capabilities = Capability.CHAT
-
-    def __init__(self, text="Revenue was $10M [1].", logprobs=None):
-        self._text = text
-        self._logprobs = logprobs if logprobs is not None else [-0.02, -0.05, -0.03]
-        self.posted: list[tuple[str, str, dict]] = []  # (collection, doc_id, metadata)
-
-    def health(self):
-        return {"models": ["fake"]}
-
-    def chat(self, messages, **kw) -> ChatResult:
-        return ChatResult(text=self._text, logprobs=self._logprobs, raw={})
-
-    def ensure_collection(self, collection):
-        pass
-
-    def post_document(self, collection, doc_id, text, metadata=None):
-        self.posted.append((collection, doc_id, metadata or {}))
-        return [f"{doc_id}/chunk/0"]
-
-    def delete_document(self, collection, doc_id):
-        return True
-
-
-class _SearchFake(FakeProvider):
-    """Fake collection search: ranks chunks sharing ≥1 query token by overlap
-    count (the engine's membership semantics), deterministic and offline."""
-
-    def __init__(self, texts: dict[str, str], **kw):
-        super().__init__(**kw)
-        self._docs = texts          # chunk_id -> chunk text
-        self.last_allowlist = None  # recorded for allowlist assertions
-
-    def collection_search(self, collection, query, *, mode="hybrid", k=10, allowlist=None):
-        assert mode in ("dense", "keyword", "hybrid"), f"bad mode {mode!r}"
-        q_tokens = set(re.findall(r"[a-z0-9]+", query.lower()))
-        q_ids = set(allowlist) if allowlist is not None else set(self._docs)
-        self.last_allowlist = list(allowlist) if allowlist is not None else None
-        rows = []
-        for cid in sorted(self._docs):
-            if cid not in q_ids:
-                continue
-            toks = set(re.findall(r"[a-z0-9]+", self._docs[cid].lower()))
-            overlap = len(q_tokens & toks)
-            if overlap:
-                rows.append({"chunk_id": cid, "document_id": cid,
-                             "text": self._docs[cid], "score": float(overlap)})
-        rows.sort(key=lambda r: (-r["score"], r["chunk_id"]))
-        return rows[:k]
-
-
-def _ret(chunks, **kw) -> Retriever:
-    """A Retriever over a corpus built from text-bearing ``chunks``, backed by
-    a fake engine whose search ranks by query-token overlap (the engine's
-    membership semantics), deterministic and offline."""
-    c = Corpus()
-    c.add(chunks)
-    p = _SearchFake({ch.chunk_id: ch.text for ch in chunks})
-    return Retriever(p, c, collection="docket", **kw)
-
-
-def _acme_chunks():
-    pages = [
-        {"page": 1, "text": "Total revenue for the fiscal year was ten million dollars."},
-        {"page": 2, "text": "Operating expenses rose while headcount stayed flat."},
-    ]
-    return chunk_pages(pages, doc_id="acme-10k", source="acme.pdf", words=8, overlap=2)
+from .fakes import FakeEngine, acme_chunks, retriever_over
 
 
 def _corpus():
     c = Corpus()
-    c.add(_acme_chunks())
+    c.add(acme_chunks())
     return c
 
 
@@ -137,7 +65,7 @@ def test_lineage_persists_without_text(tmp_path):
 def test_remove_document_service_persists(tmp_path, monkeypatch):
     import docket.service as svc
 
-    monkeypatch.setattr(svc, "get_provider", lambda s: FakeProvider())
+    monkeypatch.setattr(svc, "get_provider", lambda s: FakeEngine())
     s = Settings(index_dir=str(tmp_path))
     c = Corpus()
     c.add(chunk_pages([{"page": 1, "text": "foo bar baz"}], doc_id="d1", words=2, overlap=0))
@@ -152,7 +80,7 @@ def test_remove_document_service_persists(tmp_path, monkeypatch):
 def test_load_samples_idempotent(tmp_path, monkeypatch):
     from docket.ingest.samples import load_samples, sample_doc_ids
 
-    monkeypatch.setattr("docket.ingest.pipeline.get_provider", lambda s: FakeProvider())
+    monkeypatch.setattr("docket.ingest.pipeline.get_provider", lambda s: FakeEngine())
     s = Settings(index_dir=str(tmp_path))
     c = load_samples(settings=s)
     ids = set(c.doc_ids())
@@ -213,7 +141,7 @@ def test_add_is_idempotent():
 # --- retriever (engine client) ----------------------------------------------
 
 def test_retrieval_joins_engine_hits_to_lineage():
-    r = _ret(_acme_chunks())
+    r = retriever_over(acme_chunks())
     hits = r.retrieve("revenue", k=3)
     assert hits and "revenue" in hits[0]["text"].lower()
     assert hits[0]["doc_id"] == "acme-10k" and hits[0]["page"] == 1
@@ -223,37 +151,29 @@ def test_retrieval_joins_engine_hits_to_lineage():
 def test_retrieve_empty_corpus_skips_engine():
     # No lineage → no candidates exist; the doomed engine call is skipped, not
     # a silent substitute (there is nothing to retrieve over).
-    p = _SearchFake({})
-    r = Retriever(p, Corpus(), collection="docket")
+    r = retriever_over([])
     assert r.retrieve("anything") == []
-    assert not p.posted
+    assert not r.provider.posted
 
 
 def test_unknown_mode_rejected_loudly():
     with pytest.raises(ValueError, match="unknown search mode"):
-        _ret(_acme_chunks(), mode="rerank_experimental")
+        retriever_over(acme_chunks(), mode="rerank_experimental")
 
 
 def test_scope_doc_restricts_engine_allowlist():
     chunks = _multi_doc_chunks()
-    p = _SearchFake({ch.chunk_id: ch.text for ch in chunks})
-    c = Corpus()
-    c.add(chunks)
-    r = Retriever(p, c, collection="docket", scope_doc="bill-2")
+    r = retriever_over(chunks, scope_doc="bill-2")
     hits = r.retrieve("monthly charge", k=10)
     # The allowlist the engine received covers ONLY bill-2's chunks.
-    assert p.last_allowlist == [ch.chunk_id for ch in chunks if ch.doc_id == "bill-2"]
+    assert r.provider.last_allowlist == [ch.chunk_id for ch in chunks if ch.doc_id == "bill-2"]
     assert {h["doc_id"] for h in hits} == {"bill-2"}
 
 
 def test_iterative_retrieve_merges_and_dedups():
     chunks = chunk_pages(
         [{"page": 1, "text": "revenue grew ten million"}], doc_id="d", words=6, overlap=0)
-    p = _SearchFake({ch.chunk_id: ch.text for ch in chunks})
-    c = Corpus()
-    c.add(chunks)
-    hits = Retriever(p, c, collection="docket").iterative_retrieve(
-        ["revenue", "revenue grew"], k=5)
+    hits = retriever_over(chunks).iterative_retrieve(["revenue", "revenue grew"], k=5)
     assert hits
     assert [h["rank"] for h in hits] == sorted(h["rank"] for h in hits)
     assert len({h["chunk_id"] for h in hits}) == len(hits)  # deduped
@@ -262,23 +182,23 @@ def test_iterative_retrieve_merges_and_dedups():
 # --- orchestrator -----------------------------------------------------------
 
 def test_answer_is_grounded_cited_and_scored():
-    r = _ret(_acme_chunks())
-    res = answer("What was revenue?", retriever=r, provider=FakeProvider(), settings=Settings())
+    r = retriever_over(acme_chunks())
+    res = answer("What was revenue?", retriever=r, provider=FakeEngine(), settings=Settings())
     assert res.reliability == "high"           # low surprisal logprobs
     assert res.citations and res.citations[0].doc_id == "acme-10k"
     assert res.hits
 
 
 def test_answer_low_confidence_label():
-    r = _ret(_acme_chunks())
-    unsure = FakeProvider(logprobs=[-1.8, -2.2, -1.5])
+    r = retriever_over(acme_chunks())
+    unsure = FakeEngine(logprobs=[-1.8, -2.2, -1.5])
     res = answer("What was revenue?", retriever=r, provider=unsure, settings=Settings(max_hops=1))
     assert res.reliability == "low"
 
 
 def test_answer_unknown_without_logprobs():
-    r = _ret(_acme_chunks())
-    res = answer("q", retriever=r, provider=FakeProvider(logprobs=[]), settings=Settings())
+    r = retriever_over(acme_chunks())
+    res = answer("q", retriever=r, provider=FakeEngine(logprobs=[]), settings=Settings())
     assert res.reliability == "unknown"
 
 
@@ -359,7 +279,7 @@ def _multi_doc_chunks():
     return chunks
 
 
-class _ExtractingProvider(FakeProvider):
+class _ExtractingProvider(FakeEngine):
     """A faithful extraction stub: reads the numbered context it's actually given
     and emits the correct ``i``→value JSON (a real model does this from the same
     prompt). Unlike a blind fixed-index fake, this exercises the real hit→citation
@@ -374,7 +294,7 @@ class _ExtractingProvider(FakeProvider):
 
 
 def test_answer_aggregates_across_docs():
-    r = _ret(_multi_doc_chunks())
+    r = retriever_over(_multi_doc_chunks())
     res = answer(
         "What is the total monthly charge across all documents?",
         retriever=r, provider=_ExtractingProvider(), settings=Settings(),
@@ -389,10 +309,10 @@ def test_answer_aggregates_across_docs():
 
 
 def test_answer_aggregate_without_values_is_honest():
-    r = _ret(_multi_doc_chunks())
+    r = retriever_over(_multi_doc_chunks())
     res = answer(
         "What is the total charge across all documents?",
-        retriever=r, provider=FakeProvider(text="[]"), settings=Settings(),
+        retriever=r, provider=FakeEngine(text="[]"), settings=Settings(),
     )
     assert res.detail is None
     assert "do not contain" in res.answer.lower()   # no invented number
@@ -411,7 +331,7 @@ def test_aggregate_dedups_overlapping_duplicate_values():
     ]
     res = answer(
         "What is the total monthly charge across all documents?",
-        retriever=_ret(chunks), provider=_ExtractingProvider(), settings=Settings(),
+        retriever=retriever_over(chunks), provider=_ExtractingProvider(), settings=Settings(),
     )
     assert res.detail["result"] == 10.0 and res.detail["count"] == 1  # not $20
     assert {cit.doc_id for cit in res.citations} == {"bill"}
@@ -428,7 +348,7 @@ def test_aggregate_flags_partial_coverage():
     ]
     res = answer(
         "What is the total monthly charge across all documents?",
-        retriever=_ret(chunks), provider=_ExtractingProvider(), settings=Settings(),
+        retriever=retriever_over(chunks), provider=_ExtractingProvider(), settings=Settings(),
     )
     cov = res.detail["coverage"]
     assert cov["partial"] is True
@@ -441,7 +361,7 @@ def test_ingest_paths_skips_already_indexed_doc(monkeypatch, tmp_path):
     # or re-posting chunks to the engine; skip_existing=False forces a re-run.
     import docket.ingest.pipeline as pipe
 
-    stub = FakeProvider()
+    stub = FakeEngine()
     monkeypatch.setattr(pipe, "get_provider", lambda s: stub)
     monkeypatch.setattr(
         pipe, "pdf_to_pages",
@@ -475,7 +395,7 @@ def test_ingest_posts_filing_metadata_to_engine(monkeypatch, tmp_path):
     # mettle's documents.metadata_json).
     import docket.ingest.pipeline as pipe
 
-    stub = FakeProvider()
+    stub = FakeEngine()
     monkeypatch.setattr(pipe, "get_provider", lambda s: stub)
     monkeypatch.setattr(
         pipe, "pdf_to_pages",
@@ -507,8 +427,8 @@ def test_capacity_reports_disk_bound(tmp_path):
 
 
 def test_generate_report_and_render():
-    r = _ret(_acme_chunks())
-    res = answer("What was revenue?", retriever=r, provider=FakeProvider(), settings=Settings())
+    r = retriever_over(acme_chunks())
+    res = answer("What was revenue?", retriever=r, provider=FakeEngine(), settings=Settings())
     report = generate_report(res, title="Acme 10-K")
     md = to_markdown(report)
     assert "# Acme 10-K" in md

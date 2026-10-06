@@ -7,11 +7,11 @@ from __future__ import annotations
 import pytest
 
 from docket.config import Settings
-from docket.ingest.chunk import chunk_pages
 from docket.ingest.index import Corpus
 from docket.providers.base import Capability
 from docket.providers.openai_compat import OpenAICompatProvider
-from docket.retrieval.retriever import Retriever
+
+from .fakes import FakeEngine, acme_chunks
 
 
 class _FakeResp:
@@ -107,40 +107,20 @@ def test_engine_serves_rerank_on_the_one_base():
     assert Capability.RERANK in p.capabilities
 
 
-def _acme_chunks():
-    pages = [
-        {"page": 1, "text": "Total revenue for the fiscal year was ten million dollars."},
-        {"page": 2, "text": "Payments for property plant and equipment were thirteen billion."},
-    ]
-    return chunk_pages(pages, doc_id="acme-10k", source="acme.pdf", words=8, overlap=2)
-
-
 def test_load_retriever_wires_reranker_and_reorders(monkeypatch):
     from docket import service
-
-    chunks = _acme_chunks()
-    texts = {ch.chunk_id: ch.text for ch in chunks}
-
-    class _StubProvider:
-        name = "stub"
-        capabilities = Capability.CHAT
-
-        # Return every chunk unranked; the reranker does the ordering.
-        def collection_search(self, collection, query, *, mode="hybrid", k=10, allowlist=None):
-            rows = [{"chunk_id": cid, "document_id": cid, "text": t, "score": 0.0}
-                    for cid, t in texts.items()]
-            return rows[:k]
-
-        # Rank by document length descending — a deterministic, non-identity order.
-        def rerank(self, query, docs):
-            return [float(len(d)) for d in docs]
-
     from docket.retrieval import rerank_client
+
+    chunks = acme_chunks()
+    texts = {ch.chunk_id: ch.text for ch in chunks}
+    # rank="all" returns every chunk unranked; the reranker does the ordering
+    # (length descending — a deterministic, non-identity order).
+    engine = FakeEngine(chunks, rank="all", rerank_fn=lambda q, docs: [float(len(d)) for d in docs])
 
     # load_retriever resolves the provider twice (retriever + reranker); stub
     # both so the test never reaches a live engine.
-    monkeypatch.setattr(service, "get_provider", lambda s: _StubProvider())
-    monkeypatch.setattr(rerank_client, "get_provider", lambda s: _StubProvider())
+    monkeypatch.setattr(service, "get_provider", lambda s: engine)
+    monkeypatch.setattr(rerank_client, "get_provider", lambda s: engine)
     s = Settings(rerank_model="bge-reranker-v2-m3:latest")
     c = Corpus()
     c.add(chunks)

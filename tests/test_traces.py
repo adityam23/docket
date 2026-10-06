@@ -9,18 +9,17 @@ import json
 from docket.agent.graph import answer
 from docket.agent.trace import TraceCollector, TraceStore, compact_step, hit_view
 from docket.config import Settings
-from docket.retrieval.retriever import Retriever
 
-from .test_pipeline import FakeProvider, _ret, _acme_chunks
+from .fakes import FakeEngine, retriever_over, acme_chunks
 
 
 def test_answer_emits_ordered_trace_steps():
     steps: list[tuple[str, dict]] = []
-    r = _ret(_acme_chunks())
+    r = retriever_over(acme_chunks())
     answer(
         "What was revenue?",
         retriever=r,
-        provider=FakeProvider(),
+        provider=FakeEngine(),
         settings=Settings(max_hops=1),
         on_step=lambda k, i: steps.append((k, i)),
     )
@@ -42,8 +41,8 @@ def test_answer_emits_ordered_trace_steps():
 
 
 def test_answer_without_sink_is_unchanged():
-    r = _ret(_acme_chunks())
-    res = answer("What was revenue?", retriever=r, provider=FakeProvider(), settings=Settings())
+    r = retriever_over(acme_chunks())
+    res = answer("What was revenue?", retriever=r, provider=FakeEngine(), settings=Settings())
     assert res.answer and res.citations  # no on_step passed → loop behaves as before
 
 
@@ -114,9 +113,9 @@ def test_collector_build_record():
 def test_ask_traced_persists_and_leaks_no_secret(tmp_path, monkeypatch):
     import docket.service as svc
 
-    monkeypatch.setattr(svc, "get_provider", lambda s: FakeProvider())
+    monkeypatch.setattr(svc, "get_provider", lambda s: FakeEngine())
     s = Settings(index_dir=str(tmp_path))
-    res, trace = svc.ask_traced("What was revenue?", settings=s, retriever=_ret(_acme_chunks()))
+    res, trace = svc.ask_traced("What was revenue?", settings=s, retriever=retriever_over(acme_chunks()))
 
     assert trace["id"] and trace["question"] == "What was revenue?"
     assert trace["steps"] and trace["steps"][-1]["kind"] == "final"
@@ -134,7 +133,7 @@ def test_ask_traced_persists_and_leaks_no_secret(tmp_path, monkeypatch):
 # --- T21: first-class Chat/Session (chat → turns → trace) --------------------
 
 
-class CapturingProvider(FakeProvider):
+class CapturingProvider(FakeEngine):
     """Records every chat() call so tests can assert the exact messages."""
 
     def __init__(self, *a, **kw):
@@ -171,7 +170,7 @@ def test_trim_history_bounds_window():
 
 
 def test_answer_threads_history_into_prompt():
-    r = _ret(_acme_chunks())
+    r = retriever_over(acme_chunks())
     p = CapturingProvider()
     history = [{"role": "user", "content": "What was revenue?"}, {"role": "assistant", "content": "$10M [1]."}]
     answer(
@@ -227,15 +226,15 @@ def test_chat_store_roundtrip_and_cap(tmp_path):
 def test_ask_traced_session_nests_turns(tmp_path, monkeypatch):
     import docket.service as svc
 
-    monkeypatch.setattr(svc, "get_provider", lambda s: FakeProvider())
+    monkeypatch.setattr(svc, "get_provider", lambda s: FakeEngine())
     s = Settings(index_dir=str(tmp_path))
 
     chats = svc.chat_store(s)
     session_id = chats.next_id("2026-08-21T12:00:00+00:00")
     chats.create(session_id, "", now="2026-08-21T12:00:00+00:00")  # minted via POST /api/chats (untitled)
 
-    res1, t1 = svc.ask_traced("What was revenue?", settings=s, retriever=_ret(_acme_chunks()), session_id=session_id)
-    res2, t2 = svc.ask_traced("Summarize the key risk factors.", settings=s, retriever=_ret(_acme_chunks()), session_id=session_id)
+    res1, t1 = svc.ask_traced("What was revenue?", settings=s, retriever=retriever_over(acme_chunks()), session_id=session_id)
+    res2, t2 = svc.ask_traced("Summarize the key risk factors.", settings=s, retriever=retriever_over(acme_chunks()), session_id=session_id)
 
     # Traces nest under the chat with an ordered turn index.
     assert t1["chat_id"] == session_id and t1["turn_index"] == 0
@@ -257,9 +256,9 @@ def test_ask_traced_without_session_unchanged(tmp_path, monkeypatch):
     """Back-compat: no session_id → standalone one-shot exactly as before."""
     import docket.service as svc
 
-    monkeypatch.setattr(svc, "get_provider", lambda s: FakeProvider())
+    monkeypatch.setattr(svc, "get_provider", lambda s: FakeEngine())
     s = Settings(index_dir=str(tmp_path))
-    _, trace = svc.ask_traced("What was revenue?", settings=s, retriever=_ret(_acme_chunks()))
+    _, trace = svc.ask_traced("What was revenue?", settings=s, retriever=retriever_over(acme_chunks()))
 
     assert trace["chat_id"] is None and trace["turn_index"] is None
     assert svc.chat_store(s).list() == []       # no chat records created

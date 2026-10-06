@@ -10,23 +10,8 @@ from docket.eval.financebench import (
     score_financebench,
 )
 from docket.ingest.chunk import chunk_pages
-from docket.ingest.index import Corpus
-from docket.providers.base import Capability, ChatResult
-from docket.retrieval.retriever import Retriever
 
-
-class _RecordingProvider:
-    """Echoes the user prompt it received so tests can inspect the context."""
-
-    name = "rec"
-    capabilities = Capability.CHAT
-
-    def __init__(self):
-        self.last_user = None
-
-    def chat(self, messages, **kw) -> ChatResult:
-        self.last_user = messages[-1]["content"]
-        return ChatResult(text="42.0 [1]", logprobs=None, raw={})
+from .fakes import ScriptedProvider, retriever_over
 
 
 def _retriever():
@@ -35,17 +20,7 @@ def _retriever():
         {"page": 2, "text": "Unrelated boilerplate about corporate governance and board committees."},
     ]
     chunks = chunk_pages(pages, doc_id="ACME_2020_10K", source="acme.pdf", words=12, overlap=0)
-    texts = {ch.chunk_id: ch.text for ch in chunks}
-
-    class _FakeEngine:
-        def collection_search(self, collection, query, *, mode="hybrid", k=10, allowlist=None):
-            rows = [{"chunk_id": cid, "document_id": cid, "text": t, "score": 1.0}
-                    for cid, t in texts.items()]
-            return rows[:k]
-
-    c = Corpus()
-    c.add(chunks)
-    return Retriever(_FakeEngine(), c, collection="docket")
+    return retriever_over(chunks, rank="all")
 
 
 def _item():
@@ -64,7 +39,7 @@ def _item():
 def test_rag_feeds_retrieved_context_not_oracle():
     retriever = _retriever()
     retrieve = make_rag_retrieve(lambda doc_id: retriever, k=3)
-    provider = _RecordingProvider()
+    provider = ScriptedProvider(reply="42.0 [1]")
 
     card = run_financebench(provider, [_item()], retrieve=retrieve)
 
@@ -76,7 +51,7 @@ def test_rag_feeds_retrieved_context_not_oracle():
 
 
 def test_oracle_mode_still_feeds_gold_evidence():
-    provider = _RecordingProvider()
+    provider = ScriptedProvider(reply="42.0 [1]")
     run_financebench(provider, [_item()])  # no retrieve => oracle
     assert "ORACLE-ONLY-SENTINEL" in provider.last_user
 
@@ -84,7 +59,7 @@ def test_oracle_mode_still_feeds_gold_evidence():
 def test_rag_missing_filing_yields_empty_context():
     # retriever_for returns None (no PDF) → no hits → empty context, no crash.
     retrieve = make_rag_retrieve(lambda doc_id: None, k=3)
-    provider = _RecordingProvider()
+    provider = ScriptedProvider(reply="42.0 [1]")
     card = run_financebench(provider, [_item()], retrieve=retrieve)
     assert card.n == 1
     assert "ORACLE-ONLY-SENTINEL" not in provider.last_user

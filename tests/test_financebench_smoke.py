@@ -15,7 +15,8 @@ from docket.eval.financebench import (
     score_item,
     to_sft_example,
 )
-from docket.providers.base import Capability, ChatResult
+
+from .fakes import ScriptedProvider
 
 SMOKE_SET = Path(__file__).resolve().parents[1] / "benchmarks" / "financebench" / "smoke_set.jsonl"
 
@@ -62,26 +63,16 @@ def _oracle_answer(item: dict) -> str:
 def test_run_smoke_scores_full_set_with_scripted_provider():
     items = [json.loads(l) for l in SMOKE_SET.read_text().splitlines() if l.strip()]
 
-    class Oracle:
-        name = "oracle"
-        capabilities = Capability.CHAT
+    def _oracle_reply(messages):
+        # The grounded prompt ends with "Question: <q>" — match exactly (endswith)
+        # so questions that are substrings of others don't collide.
+        user = messages[-1]["content"]
+        for it in items:
+            if user.endswith("Question: " + it["question"]):
+                return _oracle_answer(it)
+        return "?"
 
-        def health(self):
-            return {}
-
-        def chat(self, messages, **kw):
-            # The grounded prompt ends with "Question: <q>" — match exactly (endswith)
-            # so questions that are substrings of others don't collide.
-            user = messages[-1]["content"]
-            for it in items:
-                if user.endswith("Question: " + it["question"]):
-                    return ChatResult(text=_oracle_answer(it))
-            return ChatResult(text="?")
-
-        def embed(self, texts):
-            return []
-
-    card = run_smoke(Oracle(), items, model_label="oracle")
+    card = run_smoke(ScriptedProvider(reply=_oracle_reply), items, model_label="oracle")
     assert card.n == len(items)
     assert card.accuracy == 1.0            # oracle nails every item
     assert card.hallucinated == 0
@@ -125,20 +116,9 @@ def test_score_financebench_judge_fallback_for_qualitative():
     it = fb_to_item({"financebench_id": "x", "question": "Is liquidity healthy?",
                      "answer": "Yes, liquidity is strong.", "evidence": []})
 
-    class YesJudge:
-        name = "judge"
-        capabilities = Capability.CHAT
-
-        def health(self):
-            return {}
-
-        def chat(self, messages, **kw):
-            return ChatResult(text="CORRECT")
-
-        def embed(self, texts):
-            return []
-
-    r = score_financebench(it, "The company has ample liquidity.", judge=YesJudge())
+    r = score_financebench(
+        it, "The company has ample liquidity.", judge=ScriptedProvider(reply="CORRECT")
+    )
     assert r.ok and r.reason == "judge: correct"
 
 
