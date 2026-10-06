@@ -34,6 +34,10 @@ remove_manifest() {
   while IFS= read -r entry; do
     case $entry in
       uv-tool:*) ;;                                  # handled above
+      # Pre-fix manifests recorded a user-supplied DK_WHEEL; only a wheel
+      # the installer downloaded (under the prefix) is ours to delete.
+      "$prefix"/*.whl) rm -f "$entry" ;;
+      *.whl) ;;
       /*) rm -f "$entry" ;;
     esac
   done < "$manifest"
