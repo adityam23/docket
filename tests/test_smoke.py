@@ -2,7 +2,6 @@
 `dk health` / `dk chat` in the handoff verification, not in pytest."""
 
 from docket.config import Profile, load_settings
-from docket.providers.base import Capability
 from docket.providers.router import get_provider
 from docket.trust.reliability import reliability_label
 
@@ -16,7 +15,6 @@ def test_defaults():
 def test_router_builds_local_provider():
     prov = get_provider(load_settings())
     assert prov.name == "mettle"
-    assert Capability.CHAT in prov.capabilities
 
 
 def test_slot_unavailable_becomes_graceful_answer(monkeypatch):
@@ -33,7 +31,6 @@ def test_slot_unavailable_becomes_graceful_answer(monkeypatch):
             return []
 
     class _Provider:
-        capabilities = Capability.CHAT | Capability.LOGPROBS
         def chat(self, messages, **kw):
             raise SlotUnavailable(reason="vram", missing=["qwen3:latest"], profile_degraded=True)
 

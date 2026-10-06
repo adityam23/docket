@@ -1,5 +1,11 @@
-"""Provider contract + capability tiers. Capabilities drive graceful degradation
-of the trust layer."""
+"""Provider contract + capability tiers.
+
+``Capability`` is roadmap bookkeeping for the trust layer's future tiers
+(HIDDEN_STATES/SAE, lab mode) -- it is NOT read anywhere in the live request
+path today: mettle is the only backend (cutover contract) and serves chat,
+embed, rerank and logprobs unconditionally, so there is nothing to degrade
+gracefully between. Keep the enum for the roadmap tiers; don't wire it back
+into request-shaping until a second tier actually needs branching on it."""
 
 from __future__ import annotations
 
@@ -16,6 +22,13 @@ class Capability(Flag):
     LOGPROBS = auto()       # token logprobs   -> Tier-1 trust score (entropy)
     HIDDEN_STATES = auto()  # white-box states  -> Tier-2 probe (roadmap)
     SAE = auto()            # Gemma Scope feats -> Tier-3 lab mode (roadmap)
+
+
+def bearer_headers(key: str | None) -> dict[str, str]:
+    """The ONE place an ``Authorization: Bearer`` header gets built (CLAUDE.md
+    'Reusability') -- every /v1 route, including /engine/*, takes the same
+    bearer auth. Returns {} when no key is configured (local dev)."""
+    return {"Authorization": f"Bearer {key}"} if key else {}
 
 
 @dataclass
@@ -47,10 +60,28 @@ class SlotUnavailable(Exception):
 
 @runtime_checkable
 class Provider(Protocol):
-    name: str
-    capabilities: Capability
+    """The real surface callers rely on -- chat/embed/rerank for the agent and
+    retrieval, health for the probe, the collection lifecycle + search for
+    ingest/retrieval, and ocr for scanned-page ingest. (``name`` and the old
+    ``capabilities`` attribute were plumbing nothing outside the provider
+    read -- dropped; see ``Capability``'s docstring.)"""
 
     def health(self) -> dict: ...
     def chat(self, messages: list[dict], **kw) -> ChatResult: ...
     def embed(self, texts: list[str]) -> list[list[float]]: ...
     def rerank(self, query: str, documents: list[str]) -> list[float]: ...
+    def ensure_collection(self, collection: str) -> None: ...
+    def post_document(
+        self, collection: str, doc_id: str, text: str, metadata: dict[str, str] | None = None
+    ) -> list[str]: ...
+    def delete_document(self, collection: str, doc_id: str) -> bool: ...
+    def collection_search(
+        self,
+        collection: str,
+        query: str,
+        *,
+        mode: str = "hybrid",
+        k: int = 10,
+        allowlist: list[str] | None = None,
+    ) -> list[dict]: ...
+    def ocr(self, image_b64: str, instruction: str | None = None) -> str: ...

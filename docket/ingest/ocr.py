@@ -5,11 +5,10 @@ Two tiers, chosen per page so the base install stays light:
 1. **Born-digital PDFs** — extracted with ``pypdf`` (lazy import; comes with the
    ``ingest`` extra). No model, no GPU, works offline. This is the common
    any-PDF case (Q5) and needs no download.
-2. **Scanned / image-only pages** — fall back to a real OCR model (Baidu
-   Unlimited-OCR, or Surya/dots.ocr to fit 6 GB). Loaded lazily *only* when a
-   page yields no extractable text, so we never pull multi-GB weights for a
-   text PDF. Not installed on this disk-constrained host → a clear, actionable
-   error names the missing piece rather than failing opaquely.
+2. **Scanned / image-only pages** — fall back to mettle's ``/v1/ocr`` (see
+   ``_ocr_model.py``). The rasterizer-only import (pymupdf) is lazy and loaded
+   *only* when a page yields no extractable text, so we never pull it in for a
+   text PDF.
 """
 
 from __future__ import annotations
@@ -22,7 +21,7 @@ def pdf_to_pages(path: str, *, on_missing_text: str = "ocr") -> list[dict]:
     ``on_missing_text``:
 
     * ``"ocr"`` (default) — route it through the OCR fallback, raising a clear,
-      actionable error if no OCR model is installed. This is the strict
+      actionable error if the engine's OCR call fails. This is the strict
       production behaviour: a scanned/image filing must not be ingested with
       pages silently missing.
     * ``"skip"`` — emit empty text for that page and keep the rest. For callers
@@ -49,21 +48,10 @@ def pdf_to_pages(path: str, *, on_missing_text: str = "ocr") -> list[dict]:
     return pages
 
 
-def ocr_pdf(path: str) -> str:
-    """Convenience: whole-document markdown-ish text (pages joined by rule)."""
-    return "\n\n---\n\n".join(p["text"] for p in pdf_to_pages(path))
-
-
 def _ocr_page_fallback(path: str, page: int) -> str:
-    """Scanned page → OCR model. Lazy so text PDFs never trigger a model load."""
-    try:
-        # Drop-in seam: a dedicated OCR service/model (Unlimited-OCR / Surya).
-        # Kept import-guarded; no OCR model served here yet.
-        import docket.ingest._ocr_model as _m  # type: ignore
-    except ImportError:
-        raise RuntimeError(
-            f"page {page} of {path} has no embedded text (scanned/image PDF) and "
-            "no OCR model is installed. Serve an OCR model at /v1/ocr "
-            "or pre-OCR the file."
-        ) from None
-    return _m.ocr_page(path, page)  # pragma: no cover - requires OCR weights
+    """Scanned page → mettle's ``/v1/ocr``. ``_ocr_model`` always ships (its
+    only lazy import, pymupdf, is inside ``ocr_page`` itself) so this calls
+    straight through — no import guard to fall back on."""
+    import docket.ingest._ocr_model as _m
+
+    return _m.ocr_page(path, page)  # pragma: no cover - requires a live engine

@@ -4,17 +4,19 @@ provider stands in for the `load_retriever` wiring. Deterministic."""
 
 from __future__ import annotations
 
-import pytest
-
 from docket.config import Settings
 from docket.ingest.index import Corpus
-from docket.providers.base import Capability
 from docket.providers.openai_compat import OpenAICompatProvider
 
 from .fakes import FakeEngine, acme_chunks
 
 
 class _FakeResp:
+    # `_raise_on_slot_unavailable` reads `.status_code` directly (not via
+    # `getattr(..., None)`) -- a real httpx.Response always has it, so this
+    # fake must too.
+    status_code = 200
+
     def __init__(self, payload):
         self._payload = payload
 
@@ -26,14 +28,14 @@ class _FakeResp:
 
 
 class _FakeClient:
-    """Records the last POST and returns a canned Cohere-shaped rerank body."""
+    """Records the last request and returns a canned Cohere-shaped rerank body."""
 
     def __init__(self, payload):
         self._payload = payload
         self.last_url = None
         self.last_json = None
 
-    def post(self, url, json=None):
+    def request(self, method, url, json=None):
         self.last_url = url
         self.last_json = json
         return _FakeResp(self._payload)
@@ -72,7 +74,6 @@ def test_rerank_scatters_scores_back_to_input_order():
         "query": "capex?",
         "documents": ["a", "b", "c"],
     }
-    assert Capability.RERANK in p.capabilities
 
 
 def test_rerank_empty_docs_short_circuits():
@@ -88,23 +89,13 @@ def test_rerank_ignores_out_of_range_index():
     assert p.rerank("q", ["only"]) == [0.5]
 
 
-def test_rerank_unconfigured_raises():
-    # An engine declared without RERANK must fail loudly, not silently degrade
-    # to unranked hits (cutover contract: loud failure).
-    p = OpenAICompatProvider(
-        name="mettle", base_url="http://x/v1", chat_model="m",
-        capabilities=Capability.CHAT,
-    )
-    assert Capability.RERANK not in p.capabilities
-    with pytest.raises(RuntimeError, match="rerank unconfigured"):
-        p.rerank("q", ["a"])
-
-
 def test_engine_serves_rerank_on_the_one_base():
-    # No separate rerank_url: the provider was built with just base_url and the
-    # RERANK capability is on by default (mettle serves /v1/rerank unconditionally).
+    # No separate rerank_url: the provider is built with just base_url, and
+    # mettle serves /v1/rerank unconditionally -- no capability flag gates it.
     p = OpenAICompatProvider(name="mettle", base_url="http://x/v1", chat_model="m")
-    assert Capability.RERANK in p.capabilities
+    p._client = _FakeClient({"results": []})
+    assert p.rerank("q", ["a"]) == [0.0]
+    assert p._client.last_url == "http://x/v1/rerank"
 
 
 def test_load_retriever_wires_reranker_and_reorders(monkeypatch):

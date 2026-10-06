@@ -65,16 +65,43 @@ def test_lineage_persists_without_text(tmp_path):
 def test_remove_document_service_persists(tmp_path, monkeypatch):
     import docket.service as svc
 
-    monkeypatch.setattr(svc, "get_provider", lambda s: FakeEngine())
+    d1_chunks = chunk_pages([{"page": 1, "text": "foo bar baz"}], doc_id="d1", words=2, overlap=0)
+    d2_chunks = chunk_pages([{"page": 1, "text": "qux quux corge"}], doc_id="d2", words=2, overlap=0)
+    # The engine actually holds these chunks, so every delete succeeds (2xx) --
+    # the normal case.
+    engine = FakeEngine(list(d1_chunks) + list(d2_chunks))
+    monkeypatch.setattr(svc, "get_provider", lambda s: engine)
+
     s = Settings(index_dir=str(tmp_path))
     c = Corpus()
-    c.add(chunk_pages([{"page": 1, "text": "foo bar baz"}], doc_id="d1", words=2, overlap=0))
-    c.add(chunk_pages([{"page": 1, "text": "qux quux corge"}], doc_id="d2", words=2, overlap=0))
+    c.add(d1_chunks)
+    c.add(d2_chunks)
     c.save(s.index_dir)
 
     assert svc.remove_document("d1", settings=s) > 0
     assert Corpus.load(s.index_dir).doc_ids() == ["d2"]
     assert svc.remove_document("nope", settings=s) == 0  # unknown id
+
+
+def test_remove_document_raises_and_keeps_lineage_when_engine_missing_chunk(tmp_path, monkeypatch):
+    """The engine reports a chunk 404 (out of sync with our lineage) -- removal
+    must fail loudly and leave the WHOLE document's lineage untouched, not
+    silently report success while chunks are left dangling or half-removed."""
+    import docket.service as svc
+
+    d1_chunks = chunk_pages([{"page": 1, "text": "foo bar baz"}], doc_id="d1", words=2, overlap=0)
+    # Empty engine: it never held any of d1's chunks, so every delete 404s.
+    engine = FakeEngine()
+    monkeypatch.setattr(svc, "get_provider", lambda s: engine)
+
+    s = Settings(index_dir=str(tmp_path))
+    c = Corpus()
+    c.add(d1_chunks)
+    c.save(s.index_dir)
+
+    with pytest.raises(RuntimeError, match="does not hold"):
+        svc.remove_document("d1", settings=s)
+    assert Corpus.load(s.index_dir).doc_ids() == ["d1"]  # lineage kept for retry
 
 
 def test_load_samples_idempotent(tmp_path, monkeypatch):

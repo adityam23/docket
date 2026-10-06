@@ -60,6 +60,18 @@ def remove_document(doc_id: str, *, settings: Settings | None = None) -> int:
     DELETE per chunk plus the lineage rewrite. Engine unreachable → loud
     failure (no silent local-only removal). Returns chunks removed (0 if the id
     was not present in the lineage).
+
+    Every chunk must be confirmed deleted engine-side before the lineage is
+    touched. ``provider.delete_document`` returning False means the engine does
+    not hold that chunk (404) — with a correctly-encoded chunk id (see
+    ``openai_compat._path``) that is a genuine out-of-sync state, not a routine
+    "already gone", so it is NOT treated as success. If any chunk comes back
+    missing we raise, naming the offending chunk ids, and leave the document's
+    *entire* lineage untouched rather than removing it: ``Corpus`` only removes
+    whole documents, not individual chunks, so a half-removed doc can't be
+    represented — keeping the full lineage means a retry (once the engine is
+    back in sync) deletes every chunk again rather than silently reporting
+    success while some chunks were never actually removed.
     """
     s = settings or load_settings()
     corpus = Corpus.load(s.index_dir)
@@ -67,8 +79,12 @@ def remove_document(doc_id: str, *, settings: Settings | None = None) -> int:
     if not chunk_ids:
         return 0
     provider = get_provider(s)
-    for cid in chunk_ids:
-        provider.delete_document(s.engine_collection, cid)
+    missing = [cid for cid in chunk_ids if not provider.delete_document(s.engine_collection, cid)]
+    if missing:
+        raise RuntimeError(
+            f"engine does not hold {len(missing)} of {len(chunk_ids)} chunk(s) "
+            f"for document {doc_id!r} — lineage kept for retry: {', '.join(missing)}"
+        )
     removed = corpus.remove(doc_id)
     if removed:
         corpus.save(s.index_dir)
