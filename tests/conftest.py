@@ -14,6 +14,7 @@ import os
 
 import pytest
 
+from docket import config_write
 from docket.config import Settings
 
 
@@ -29,3 +30,7 @@ def _isolated_env(monkeypatch, tmp_path):
 
     # A private index dir, not the real checkout's .docket_index.
     monkeypatch.setenv("DK_INDEX_DIR", str(tmp_path))
+
+    # Nor does any test write the checkout's real .env.local (config_write's
+    # single write target); tests that read it back redirect it themselves.
+    monkeypatch.setattr(config_write, "_ENV_LOCAL_FILE", str(tmp_path / ".env.local"))
