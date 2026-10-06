@@ -135,7 +135,12 @@ def test_load_retriever_wires_reranker_and_reorders(monkeypatch):
         def rerank(self, query, docs):
             return [float(len(d)) for d in docs]
 
+    from docket.retrieval import rerank_client
+
+    # load_retriever resolves the provider twice (retriever + reranker); stub
+    # both so the test never reaches a live engine.
     monkeypatch.setattr(service, "get_provider", lambda s: _StubProvider())
+    monkeypatch.setattr(rerank_client, "get_provider", lambda s: _StubProvider())
     s = Settings(rerank_model="bge-reranker-v2-m3:latest")
     c = Corpus()
     c.add(chunks)
