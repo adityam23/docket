@@ -66,15 +66,33 @@ def _start_engine_supervisor() -> None:
     get_supervisor(load_settings()).ensure()
 
 
+def stop_engine_if_ephemeral() -> None:
+    """Stop the engine supervisor's process group — but ONLY for the packaged
+    app, which opts in via ``DK_ENGINE_EPHEMERAL=1`` (the Tauri sidecar sets it
+    at spawn). On the dev path (`dk serve`, incl. its --reload restarts) the
+    engine stays warm across reloads: killing mettled per edit would cost a
+    full weight reload.
+
+    One gated implementation, two callers: this process's own FastAPI
+    ``shutdown`` hook below (the dev-path behaviour, and a safety net for the
+    packaged app), and the frozen sidecar's early-signal path
+    (``packaging/docket_server_main.py``), which calls this BEFORE uvicorn's
+    graceful connection drain rather than after — see that module's docstring
+    for why the ordering matters. ``EngineSupervisor.stop()`` is idempotent
+    (a no-op once the engine is already stopped), so both callers racing or
+    double-calling is harmless.
+    """
+    if os.environ.get("DK_ENGINE_EPHEMERAL") == "1":
+        get_supervisor(load_settings()).stop()
+
+
 @app.on_event("shutdown")
 def _stop_engine_supervisor() -> None:
     """SIGTERM/SIGINT (uvicorn shutdown) stops the engine supervisor's process
-    group — but ONLY for the packaged app, which opts in via
-    ``DK_ENGINE_EPHEMERAL=1`` (the Tauri sidecar sets it at spawn). On the dev
-    path (`dk serve`, incl. its --reload restarts) the engine stays warm across
-    reloads: killing mettled per edit would cost a full weight reload."""
-    if os.environ.get("DK_ENGINE_EPHEMERAL") == "1":
-        get_supervisor(load_settings()).stop()
+    group. See ``stop_engine_if_ephemeral`` for the gating; this hook is the
+    dev-path behaviour (and, for the packaged sidecar, a harmless second call
+    after its own early-signal stop already ran)."""
+    stop_engine_if_ephemeral()
 
 
 _FRONTEND = Path(__file__).parent / "frontend" / "build"
