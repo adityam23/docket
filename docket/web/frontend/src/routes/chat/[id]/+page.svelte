@@ -5,8 +5,8 @@
 	// belongs to a Chat session (T21), a breadcrumb names the chat and turn.
 	import { onMount } from 'svelte';
 	import { page } from '$app/stores';
-	import { api } from '$lib/api.js';
-	import { when } from '$lib/format.js';
+	import { api, errMsg } from '$lib/api.js';
+	import { when, reliability } from '$lib/format.js';
 	import Chip from '$lib/components/Chip.svelte';
 	import Icon from '$lib/components/Icon.svelte';
 	import Timeline from '$lib/components/Timeline.svelte';
@@ -21,17 +21,13 @@
 		try {
 			trace = await api.trace(id);
 		} catch (e) {
-			error = String(e).replace(/^Error:\s*/, '');
+			error = errMsg(e);
 		}
 	}
 	// Re-fetch if the id changes (client-side nav between chats).
 	$effect(() => {
 		if (id) load();
 	});
-
-	function relTone(rel) {
-		return rel === 'low' ? 'bad' : rel === 'medium' ? 'warn' : rel === 'high' ? 'ok' : 'neutral';
-	}
 </script>
 
 <div class="page-head">
@@ -62,7 +58,7 @@
 		<div class="answer">{trace.answer}</div>
 
 		<div class="row wrap meta">
-			<Chip tone={relTone(trace.reliability)} dot>{trace.reliability}</Chip>
+			<Chip tone={reliability(trace.reliability).tone} dot>{trace.reliability}</Chip>
 			{#if trace.path === 'aggregate'}<Chip tone="accent">aggregate</Chip>{/if}
 			{#if trace.hops > 1}<Chip tone="neutral">{trace.hops} hops</Chip>{/if}
 			<Chip tone="neutral">{trace.elapsed_ms} ms</Chip>

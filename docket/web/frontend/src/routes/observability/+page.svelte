@@ -9,8 +9,8 @@
 	//              (no session) list flat. Expanding a turn loads the verbatim
 	//              timeline via the shared component.
 	import { onMount } from 'svelte';
-	import { api } from '$lib/api.js';
-	import { when } from '$lib/format.js';
+	import { api, errMsg } from '$lib/api.js';
+	import { when, reliability } from '$lib/format.js';
 	import Icon from '$lib/components/Icon.svelte';
 	import Chip from '$lib/components/Chip.svelte';
 	import EnginePanel from '$lib/components/EnginePanel.svelte';
@@ -36,7 +36,7 @@
 				api.overview().catch(() => null)
 			]);
 		} catch (e) {
-			error = String(e).replace(/^Error:\s*/, '');
+			error = errMsg(e);
 		}
 	}
 	onMount(refresh);
@@ -55,15 +55,11 @@
 			try {
 				full[id] = await api.trace(id);
 			} catch (e) {
-				error = String(e).replace(/^Error:\s*/, '');
+				error = errMsg(e);
 			} finally {
 				loadingId = '';
 			}
 		}
-	}
-
-	function relTone(rel) {
-		return rel === 'low' ? 'bad' : rel === 'medium' ? 'warn' : rel === 'high' ? 'ok' : 'neutral';
 	}
 
 	// Two-step delete: first click arms the confirm, second commits. Deleting a chat
@@ -76,7 +72,7 @@
 			traces = (traces || []).filter((t) => t.chat_id !== id);
 			if (openId === 'chat:' + id) openId = '';
 		} catch (e) {
-			error = String(e).replace(/^Error:\s*/, '');
+			error = errMsg(e);
 		} finally {
 			busyDelete = '';
 			confirming = '';
@@ -90,7 +86,7 @@
 			delete full[id];
 			if (openId === id) openId = '';
 		} catch (e) {
-			error = String(e).replace(/^Error:\s*/, '');
+			error = errMsg(e);
 		} finally {
 			busyDelete = '';
 			confirming = '';
@@ -192,7 +188,7 @@
 						<div class="turns fade-in">
 							{#each c.turns as turn}
 								<div class="turn-row">
-									<span class="rg {relTone(turn.reliability)}"></span>
+									<span class="rg {reliability(turn.reliability).tone}"></span>
 									<a class="tq" href={`/chat/${turn.trace_id}`}>{turn.question}</a>
 									<span class="mute2 small mono">{turn.trace_id}</span>
 									<span class="mute2 small">{when(turn.created_at)}</span>
@@ -213,7 +209,7 @@
 							<span class="caret" class:open={openId === t.id}><Icon name="down" size={12} /></span>
 							<span class="q">{t.question}</span>
 							<span class="meta">
-								<Chip tone={relTone(t.reliability)} dot>{t.reliability}</Chip>
+								<Chip tone={reliability(t.reliability).tone} dot>{t.reliability}</Chip>
 								{#if t.path === 'aggregate'}<Chip tone="accent">aggregate</Chip>{/if}
 								{#if t.hops > 1}<Chip tone="neutral">{t.hops} hops</Chip>{/if}
 								<span class="mute2 small mono">{t.elapsed_ms} ms</span>

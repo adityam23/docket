@@ -7,7 +7,7 @@
 	//   Reasoning — the full persisted trace timeline (lazy-loaded by trace_id)
 	//   Lab       — SAE feature-attribution / steering; requires a white-box local
 	//               backend. On hosted API keys it degrades to an honest note.
-	import { api } from '$lib/api.js';
+	import { api, errMsg } from '$lib/api.js';
 	import { filingCite } from '$lib/format.js';
 	import HitCard from '$lib/components/HitCard.svelte';
 	import Icon from '$lib/components/Icon.svelte';
@@ -29,7 +29,7 @@
 		try {
 			full = await api.trace(res.trace_id);
 		} catch (e) {
-			fullError = String(e).replace(/^Error:\s*/, '');
+			fullError = errMsg(e);
 		} finally {
 			loadingFull = false;
 		}

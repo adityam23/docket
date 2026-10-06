@@ -7,7 +7,7 @@
 	// reserved for the reliability signal (design-language §3), so slot states
 	// read as neutral text; only a hard error takes `.bad`.
 	import { onMount, onDestroy } from 'svelte';
-	import { api } from '$lib/api.js';
+	import { api, errMsg } from '$lib/api.js';
 	import { gb } from '$lib/format.js';
 	import Icon from '$lib/components/Icon.svelte';
 
@@ -25,7 +25,7 @@
 				// exists — an engine without a surface has no events to replay.
 				if (d.available && !closeEvents) startEvents();
 			})
-			.catch((e) => (err = String(e).replace(/^Error:\s*/, '')));
+			.catch((e) => (err = errMsg(e)));
 	}
 	function startEvents() {
 		closeEvents = api.engineEvents(
@@ -51,7 +51,7 @@
 			const res = await api.engineProfile(name);
 			if (res && !res.accepted) err = res.error || res.detail || 'activation rejected';
 		} catch (e) {
-			err = String(e).replace(/^Error:\s*/, '');
+			err = errMsg(e);
 		} finally {
 			busy = '';
 			load(); // re-read active immediately; SSE continues the progress line

@@ -7,8 +7,8 @@
 	// backend doesn't serve (a live DE pipeline, FinanceBench) degrade to an
 	// honest "not configured" face — never a fake number.
 	import { onMount } from 'svelte';
-	import { api } from '$lib/api.js';
-	import { num, pct, bytesish, when } from '$lib/format.js';
+	import { api, errMsg } from '$lib/api.js';
+	import { num, pct, bytesish, when, reliability } from '$lib/format.js';
 	import Chip from '$lib/components/Chip.svelte';
 	import Icon from '$lib/components/Icon.svelte';
 	import Tile from '$lib/components/Tile.svelte';
@@ -23,7 +23,7 @@
 			ov = o;
 			traces = t.traces || [];
 		} catch (e) {
-			error = String(e).replace(/^Error:\s*/, '');
+			error = errMsg(e);
 		}
 	}
 	onMount(() => {
@@ -48,10 +48,6 @@
 		return { total: t.length, ...c };
 	});
 	let recents = $derived((traces || []).slice(0, 6));
-
-	function relDot(r) {
-		return r === 'low' ? 'bad' : r === 'medium' ? 'warn' : r === 'high' ? 'ok' : 'neutral';
-	}
 </script>
 
 <div class="hub">
@@ -94,7 +90,7 @@
 				<div class="trust-bars">
 					{#each [['high', trust.high], ['medium', trust.medium], ['low', trust.low], ['unknown', trust.unknown]] as [k, v]}
 						{#if v}
-							<span class="tb {relDot(k)}" style="flex: {v}" title="{v} {k}"></span>
+							<span class="tb {reliability(k).tone}" style="flex: {v}" title="{v} {k}"></span>
 						{/if}
 					{/each}
 				</div>
@@ -149,7 +145,7 @@
 		<div class="strip" style="--i: 3">
 			{#each recents as r}
 				<a class="recent" href={`/chat/${r.id}`}>
-					<span class="rg {relDot(r.reliability)}"></span>
+					<span class="rg {reliability(r.reliability).tone}"></span>
 					<span class="rq">{r.question}</span>
 					<span class="rt mute2 small">{when(r.created_at)}</span>
 				</a>

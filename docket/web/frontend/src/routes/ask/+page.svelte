@@ -11,7 +11,7 @@
 	// every later question sends `session_id` so prior turns are threaded into
 	// the model's context. "New chat" starts fresh.
 	import { onDestroy, tick } from 'svelte';
-	import { api } from '$lib/api.js';
+	import { api, errMsg } from '$lib/api.js';
 	import { num, caution } from '$lib/format.js';
 	import Chip from '$lib/components/Chip.svelte';
 	import ExplainDrawer from '$lib/components/ExplainDrawer.svelte';
@@ -78,7 +78,7 @@
 			try {
 				sessionId = (await api.createChat()).id;
 			} catch (e) {
-				upd({ error: String(e).replace(/^Error:\s*/, ''), loading: false });
+				upd({ error: errMsg(e), loading: false });
 				return;
 			}
 		}

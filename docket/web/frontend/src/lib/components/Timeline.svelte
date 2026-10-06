@@ -5,7 +5,7 @@
 	// Ask (T07). Steps render with the shared line-glyph set; expandable bodies
 	// show verbatim prompts / context / hits. Monochrome rail; the accent marks
 	// model-touching steps.
-	import { stepMeta } from '$lib/format.js';
+	import { stepMeta, reliability } from '$lib/format.js';
 	import Chip from '$lib/components/Chip.svelte';
 	import HitCard from '$lib/components/HitCard.svelte';
 	import Icon from '$lib/components/Icon.svelte';
@@ -57,7 +57,7 @@
 				<button class="head" class:plain={!body} onclick={() => body && toggle(i)}>
 					<span class="lbl caps">{m.label}</span>
 					{#if summary(s)}<span class="sum mono">{summary(s)}</span>{/if}
-					{#if s.reliability}<Chip tone={s.reliability === 'low' ? 'bad' : s.reliability === 'medium' ? 'warn' : 'ok'} dot>{s.reliability}</Chip>{/if}
+					{#if s.reliability}<Chip tone={reliability(s.reliability).tone} dot>{s.reliability}</Chip>{/if}
 					{#if body}<span class="caret" class:open={openIdx[i]}><Icon name="down" size={12} /></span>{/if}
 				</button>
 

@@ -6,26 +6,48 @@
 // waste memory base64-encoding it. Keep in sync with the server constant.
 export const MAX_PDF_BYTES = 50 * 1024 * 1024;
 
-async function getJSON(path) {
-	const r = await fetch(path);
-	if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
-	return r.json();
+// One error shape everywhere: every fetch helper below throws a plain Error
+// whose `.message` is already the clean server/HTTP message — never a raw
+// "Error: " toString(), never a dumped response blob. Call sites read it with
+// `errMsg(e)` instead of each re-deriving it via their own String(e).replace(...).
+export function errMsg(e) {
+	return e?.message ?? String(e);
 }
 
-async function sendJSON(path, method, body) {
-	const r = await fetch(path, {
+async function toJSON(r) {
+	try {
+		return await r.json();
+	} catch {
+		return null;
+	}
+}
+
+// Shared request core (one concept, one implementation — GET and POST/PATCH/
+// DELETE differ only in fetch() options). On a non-ok response, prefer the
+// FastAPI HTTPException `{"detail": "<message>"}` shape; fall back to the raw
+// HTTP status when the body isn't that shape (e.g. a 422 validation array).
+async function request(path, opts) {
+	const r = await fetch(path, opts);
+	const data = await toJSON(r);
+	if (!r.ok) {
+		const detail = data && typeof data.detail === 'string' ? data.detail : null;
+		throw new Error(detail || `${r.status} ${r.statusText}`.trim());
+	}
+	return data ?? {};
+}
+
+function jsonOpts(method, body) {
+	return {
 		method,
 		headers: { 'Content-Type': 'application/json' },
 		body: body === undefined ? undefined : JSON.stringify(body)
-	});
-	const data = await r.json().catch(() => ({}));
-	if (!r.ok) throw new Error(data.detail || `${r.status}`);
-	return data;
+	};
 }
 
-const postJSON = (path, body) => sendJSON(path, 'POST', body);
-const patchJSON = (path, body) => sendJSON(path, 'PATCH', body);
-const del = (path) => sendJSON(path, 'DELETE');
+const getJSON = (path) => request(path);
+const postJSON = (path, body) => request(path, jsonOpts('POST', body));
+const patchJSON = (path, body) => request(path, jsonOpts('PATCH', body));
+const del = (path) => request(path, jsonOpts('DELETE'));
 
 // Read a File (from a folder picker) into a base64 payload for /api/ingest/upload.
 function fileToB64(file) {
@@ -47,9 +69,12 @@ export const api = {
 	capacity: () => getJSON('/api/capacity'),
 	config: () => getJSON('/api/config'),
 	health: () => getJSON('/api/health'),
-	ask: (question, sessionId = null) =>
-		postJSON('/api/ask', sessionId ? { question, session_id: sessionId } : { question }),
-	ingest: (folder) => postJSON('/api/ingest', { folder }),
+	// Non-secret settings (Settings page, T01) → .env.local overlay; returns the
+	// fresh redacted config view. Provider API keys (BYOK) never echo the value
+	// back — only which keys are now set (web/app.py PATCH /api/config, POST
+	// /api/config/keys).
+	updateConfig: (updates) => patchJSON('/api/config', { updates }),
+	setKey: (provider, value) => postJSON('/api/config/keys', { provider, value }),
 	ingestStatus: () => getJSON('/api/ingest/status'),
 	removeDoc: (docId) => del(`/api/corpus/${encodeURIComponent(docId)}`),
 	loadSamples: () => postJSON('/api/samples/load'),
@@ -63,7 +88,6 @@ export const api = {
 	trace: (id) => getJSON(`/api/traces/${encodeURIComponent(id)}`),
 	deleteTrace: (id) => del(`/api/traces/${encodeURIComponent(id)}`),
 	chats: () => getJSON('/api/chats'),
-	chat: (id) => getJSON(`/api/chats/${encodeURIComponent(id)}`),
 	deleteChat: (id) => del(`/api/chats/${encodeURIComponent(id)}`),
 	// Mint an empty Chat session (T21); the first turn names it.
 	createChat: () => postJSON('/api/chats', {}),
@@ -72,7 +96,7 @@ export const api = {
 	// The SPA never talks to the engine directly — the server proxies it and holds
 	// the bearer, so no CORS / secret exposure (see web/app.py).
 	engine: () => getJSON('/api/engine'),
-	engineProfile: (name) => sendJSON('/api/engine/profile', 'PUT', { name }),
+	engineProfile: (name) => request('/api/engine/profile', jsonOpts('PUT', { name })),
 	// Live profile-switch progress: replayed SSE (last 100 events on connect).
 	// Returns a cancel fn; onEvent fires per SSE event (JSON data payloads).
 	engineEvents(onEvent, onError) {

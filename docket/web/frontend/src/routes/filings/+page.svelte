@@ -6,7 +6,7 @@
 	// visible across navigation. Dense work surface; typographic rows, tabular
 	// figures, no chrome.
 	import { onMount } from 'svelte';
-	import { api, MAX_PDF_BYTES } from '$lib/api.js';
+	import { api, errMsg, MAX_PDF_BYTES } from '$lib/api.js';
 	import { ingest } from '$lib/stores/ingest.js';
 	import { num, pct, bytesish, gb, stage as stageInfo } from '$lib/format.js';
 	import Chip from '$lib/components/Chip.svelte';
@@ -33,7 +33,7 @@
 		try {
 			[corpus, capacity, overview] = await Promise.all([api.corpus(), api.capacity(), api.overview()]);
 		} catch (e) {
-			error = String(e).replace(/^Error:\s*/, '');
+			error = errMsg(e);
 		}
 	}
 
@@ -69,7 +69,7 @@
 			ingest.kick(started);
 			ingestError = warn;
 		} catch (err) {
-			ingestError = String(err).replace(/^Error:\s*/, '');
+			ingestError = errMsg(err);
 		} finally {
 			busy = false;
 		}
@@ -94,7 +94,7 @@
 			await api.loadSamples();
 			await loadCorpus();
 		} catch (err) {
-			ingestError = String(err).replace(/^Error:\s*/, '');
+			ingestError = errMsg(err);
 		} finally {
 			busy = false;
 		}
@@ -107,7 +107,7 @@
 			await api.removeDoc(docId);
 			await loadCorpus();
 		} catch (err) {
-			ingestError = String(err).replace(/^Error:\s*/, '');
+			ingestError = errMsg(err);
 		} finally {
 			removing = '';
 		}

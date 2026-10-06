@@ -5,7 +5,7 @@
 	// overlay); provider API keys via POST /api/config/keys (0600, never echoed).
 	// Appearance (density / motion) is a client-side preference in the ui store.
 	import { onMount } from 'svelte';
-	import { api } from '$lib/api.js';
+	import { api, errMsg } from '$lib/api.js';
 	import { ui } from '$lib/stores/ui.js';
 	import Chip from '$lib/components/Chip.svelte';
 
@@ -50,7 +50,7 @@
 			[cfg, health] = await Promise.all([api.config(), api.health()]);
 			initForm();
 		} catch (e) {
-			error = String(e).replace(/^Error:\s*/, '');
+			error = errMsg(e);
 		}
 	}
 	onMount(load);
@@ -76,7 +76,7 @@
 			saved = true;
 			setTimeout(() => (saved = false), 2500);
 		} catch (e) {
-			saveError = String(e).replace(/^Error:\s*/, '');
+			saveError = errMsg(e);
 		} finally {
 			saving = false;
 		}
@@ -90,7 +90,7 @@
 			cfg = { ...cfg, api_keys: r.api_keys };
 			keyInput[provider] = '';
 		} catch (e) {
-			saveError = String(e).replace(/^Error:\s*/, '');
+			saveError = errMsg(e);
 		} finally {
 			keyBusy = '';
 		}
