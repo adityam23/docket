@@ -78,10 +78,6 @@
 		<Tile href="/filings" label="corpus" size="s-medium" flipKey={totals.documents + ':' + totals.chunks} glyph="db">
 			<div class="tile-big">{num(totals.documents)}</div>
 			<div class="tile-sub">{num(totals.chunks)} chunks · {bytesish(totals.chars)} chars</div>
-			<div class="row spread small mute2" style="margin-top: auto">
-				<span>embedding coverage</span>
-				<span class="mono">{pct(totals.embedding_coverage)}</span>
-			</div>
 		</Tile>
 
 		<!-- Trust summary — the ONLY place the triad appears -->
@@ -117,7 +113,7 @@
 		{#if cap}
 			<Tile href="/filings" label="room to grow" size="s-small" flipKey={cap.remaining_documents_est}>
 				<div class="tile-big">~{num(cap.remaining_documents_est)}</div>
-				<div class="tile-sub">more filings fit · limited by {cap.binding_constraint === 'ram' ? 'RAM' : 'disk'}</div>
+				<div class="tile-sub">more filings fit · limited by {cap.binding_constraint}</div>
 			</Tile>
 		{/if}
 

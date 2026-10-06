@@ -69,16 +69,18 @@ def ingest(folder: str) -> None:
 @app.command()
 def docs() -> None:
     """List indexed documents and how many more this device can hold."""
+    from .ingest.index import Corpus
     from .web.observability import capacity_stats, corpus_stats
 
     s = load_settings()
-    stats = corpus_stats(s)
+    corpus = Corpus.load(s.index_dir)  # load once; hand it to both read models
+    stats = corpus_stats(s, corpus=corpus)
     for d in stats["documents"]:
         typer.echo(f"  {d['doc_id']:<48} {d['pages']:>4}p {d['chunks']:>4}c  [{d['stage']}]")
     t = stats["totals"]
     typer.echo(f"\n{t['documents']} documents · {t['chunks']} chunks")
 
-    cap = capacity_stats(s, corpus=None)
+    cap = capacity_stats(s, corpus=corpus)
     free_gb = cap["device"]["disk_free_bytes"] / 1024**3
     typer.echo(
         f"~{cap['remaining_documents_est']:,} more documents fit "

@@ -1,14 +1,14 @@
 <script>
 	// Filings — browse · fuzzy-search · add · remove, plus corpus telemetry
-	// (retrieval mode, embedding coverage) and capacity. The general "what's in
-	// the corpus" numbers live here; per-answer telemetry lives in Observability.
-	// Ingest add/remove reuse the app-wide ingest store (T12) so a job stays
-	// visible across navigation. Dense work surface; typographic rows, tabular
-	// figures, no chrome.
+	// (retrieval mode, capacity) — the general "what's in the corpus" numbers
+	// live here; per-answer telemetry lives in Observability. Ingest add/remove
+	// reuse the app-wide ingest store (T12) so a job stays visible across
+	// navigation. Dense work surface; typographic rows, tabular figures, no
+	// chrome.
 	import { onMount } from 'svelte';
 	import { api, errMsg, MAX_PDF_BYTES } from '$lib/api.js';
 	import { ingest } from '$lib/stores/ingest.js';
-	import { num, pct, bytesish, gb, stage as stageInfo } from '$lib/format.js';
+	import { num, bytesish, gb, stage as stageInfo } from '$lib/format.js';
 	import Chip from '$lib/components/Chip.svelte';
 	import Icon from '$lib/components/Icon.svelte';
 	import Meter from '$lib/components/Meter.svelte';
@@ -16,7 +16,6 @@
 
 	let corpus = $state(null);
 	let capacity = $state(null);
-	let overview = $state(null);
 	let error = $state('');
 	let query = $state('');
 
@@ -31,7 +30,7 @@
 
 	async function loadCorpus() {
 		try {
-			[corpus, capacity, overview] = await Promise.all([api.corpus(), api.capacity(), api.overview()]);
+			[corpus, capacity] = await Promise.all([api.corpus(), api.capacity()]);
 		} catch (e) {
 			error = errMsg(e);
 		}
@@ -117,7 +116,7 @@
 
 	let docs = $derived(corpus?.documents ?? []);
 	let totals = $derived(corpus?.totals);
-	let emb = $derived(overview?.embeddings);
+	let retrievalMode = $derived(corpus?.retrieval?.mode);
 
 	// Simple, dependency-free fuzzy filter: subsequence match on doc id / source.
 	function fuzzy(needle, hay) {
@@ -140,23 +139,18 @@
 {#if totals}
 	<div class="cards dense">
 		<StatCard label="Filings" value={num(totals.documents)} sub="{num(totals.chunks)} chunks · {bytesish(totals.chars)} chars" />
-		<StatCard
-			label="Embedding coverage"
-			value={pct(totals.embedding_coverage)}
-			sub="{num(totals.vectorized_chunks)} / {num(totals.chunks)} vectorized"
-		/>
 		<div class="stat">
 			<div class="label">Retrieval</div>
 			<div class="value" style="font-size: var(--fs-md); margin-top: 10px">
-				<Chip tone="neutral">{emb?.enabled ? 'hybrid' : 'sparse-only'}</Chip>
+				<Chip tone="neutral">{retrievalMode || '—'}</Chip>
 			</div>
-			<div class="sub">{emb?.retrieval_mode || '—'}{#if emb?.dim} · {emb.dim}-dim{/if}</div>
+			<div class="sub">{corpus?.retrieval?.collection || '—'}</div>
 		</div>
 		{#if capacity}
 			<StatCard
 				label="Room to grow"
 				value="~{num(capacity.remaining_documents_est)}"
-				sub="more filings · limited by {capacity.binding_constraint === 'ram' ? 'RAM' : 'disk'}"
+				sub="more filings · limited by {capacity.binding_constraint}"
 			/>
 		{/if}
 	</div>
@@ -198,9 +192,8 @@
 {#if capacity}
 	<div class="small mute2" style="margin-top: 12px">
 		About <strong>{num(capacity.remaining_documents_est)}</strong> more filings fit — limited by
-		{capacity.binding_constraint === 'ram' ? 'RAM' : 'disk'}
+		{capacity.binding_constraint}
 		({gb(capacity.device.disk_free_bytes)} GB disk free{#if capacity.device.ram_total_bytes}, {gb(capacity.device.ram_total_bytes)} GB RAM{/if}).
-		The corpus stays in memory for retrieval, so RAM bounds growth too.
 	</div>
 {/if}
 {#if ingestError}
@@ -219,7 +212,7 @@
 				{@const si = stageInfo(d.stage)}
 				<div class="job-doc" style="--i: {di}">
 					<span class="mono jd-name">{d.doc_id}</span>
-					<Chip tone={si.tone} dot={['ocr', 'chunk', 'embed', 'index'].includes(d.stage)}>{si.label}</Chip>
+					<Chip tone={si.tone} dot={['ocr', 'chunk', 'post'].includes(d.stage)}>{si.label}</Chip>
 					{#if d.chunks}<span class="mute2 small">{d.chunks} chunks</span>{/if}
 					{#if d.error}<span class="small err">{d.error}</span>{/if}
 				</div>
@@ -258,7 +251,6 @@
 				<th>Stage</th>
 				<th class="num">Pages</th>
 				<th class="num">Chunks</th>
-				<th style="width: 180px">Embedding coverage</th>
 				<th class="num">Remove</th>
 			</tr>
 		</thead>
@@ -270,12 +262,6 @@
 					<td><Chip tone={si.tone} dot>{si.label}</Chip></td>
 					<td class="num">{d.pages}</td>
 					<td class="num">{d.chunks}</td>
-					<td>
-						<div class="row" style="gap: 10px">
-							<div style="flex: 1"><Meter value={d.coverage} ok={d.coverage >= 0.999} /></div>
-							<span class="mono small mute2" style="width: 34px">{pct(d.coverage)}</span>
-						</div>
-					</td>
 					<td class="num">
 						<button
 							class="icon-btn"
@@ -290,7 +276,7 @@
 				</tr>
 			{/each}
 			{#if !shown.length}
-				<tr><td colspan="6" class="mute2 small" style="text-align: center; padding: 22px">No filings match "{query}".</td></tr>
+				<tr><td colspan="5" class="mute2 small" style="text-align: center; padding: 22px">No filings match "{query}".</td></tr>
 			{/if}
 		</tbody>
 	</table>

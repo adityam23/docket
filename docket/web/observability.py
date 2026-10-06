@@ -35,21 +35,15 @@ class DocView:
     pages: int          # distinct source pages covered
     page_min: int
     page_max: int
-    stage: str          # queued | indexed
+    stage: str          # terminal lineage stage: "indexed" (always — a doc only
+                        # exists here once ≥1 chunk is persisted; live in-flight
+                        # stages — ocr/chunk/post — come from the ingest job
+                        # registry, not this read model)
     chars: int          # total text characters (rough corpus weight)
     form_type: str = ""   # filing metadata (T22), empty when unknown
     company: str = ""
     ticker: str = ""
     fiscal_period: str = ""
-
-
-def _doc_stage(chunks: int) -> str:
-    """A document's terminal ingest stage from what landed in the lineage.
-
-    Live in-flight stages (ocr/chunking/engine-post) come from the ingest job
-    registry; ``indexed`` is the resting state once lineage is persisted (the
-    chunks themselves live engine-side)."""
-    return "indexed" if chunks else "queued"
 
 
 def corpus_stats(settings: Settings | None = None, *, corpus: Corpus | None = None) -> dict:
@@ -81,7 +75,7 @@ def corpus_stats(settings: Settings | None = None, *, corpus: Corpus | None = No
                 pages=len(pages),
                 page_min=min(pages) if pages else 0,
                 page_max=max(pages) if pages else 0,
-                stage=_doc_stage(d["chunks"]),
+                stage="indexed",
                 chars=d["chars"],
                 form_type=d["form_type"],
                 company=d["company"],

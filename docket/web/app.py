@@ -41,6 +41,7 @@ from ..config_write import (
     set_secret,
     update_config,
 )
+from ..ingest.index import Corpus
 from ..ingest.samples import load_samples
 from ..report.render import reliability_banner
 from ..service import ask_traced as ask_traced_service
@@ -266,14 +267,21 @@ def api_load_samples() -> dict:
 
 @app.get("/api/overview")
 def api_overview() -> dict:
-    """One call for the dashboard landing: health + corpus totals + config."""
-    stats = corpus_stats()
+    """One call for the dashboard landing: health + corpus totals + config.
+
+    Loads settings and the corpus exactly once and hands them to every read
+    model that needs them — corpus_stats and capacity_stats each default to
+    reloading both when called bare, which would otherwise cost two
+    ``Corpus.load``s and several ``load_settings()`` calls on this one request."""
+    s = load_settings()
+    corpus = Corpus.load(s.index_dir)
+    stats = corpus_stats(s, corpus=corpus)
     return {
-        "health": health_service(),
-        "config": config_view(),
+        "health": health_service(s),
+        "config": config_view(s),
         "totals": stats["totals"],
         "retrieval": stats["retrieval"],
-        "capacity": capacity_stats(),
+        "capacity": capacity_stats(s, corpus=corpus),
         "index_dir": stats.get("index_dir"),
     }
 

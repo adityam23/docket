@@ -6,6 +6,7 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 
 from docket.agent.graph import Answer
+from docket.ingest.index import Corpus
 from docket.providers.openai_compat import _extract_logprobs
 from docket.report.schema import Citation
 import docket.web.app as webapp
@@ -50,13 +51,16 @@ def test_index_page_served():
 
 
 def test_api_corpus_and_config(monkeypatch):
+    # /api/corpus and /api/config call these bare; /api/overview calls them
+    # with the settings/corpus it already loaded once (see api_overview) — the
+    # fakes accept either calling convention.
     monkeypatch.setattr(
         webapp, "corpus_stats",
-        lambda: {"totals": {"documents": 1, "chunks": 3}, "retrieval": {"mode": "hybrid"}, "index_dir": ".x"},
+        lambda *a, **k: {"totals": {"documents": 1, "chunks": 3}, "retrieval": {"mode": "hybrid"}, "index_dir": ".x"},
     )
-    monkeypatch.setattr(webapp, "config_view", lambda: {"backend_url": "http://127.0.0.1:11434/v1", "chat_model": "m"})
-    monkeypatch.setattr(webapp, "health_service", lambda: {"ok": True, "provider": "mettle", "models": ["fake"]})
-    monkeypatch.setattr(webapp, "capacity_stats", lambda: {"remaining_documents_est": 1})
+    monkeypatch.setattr(webapp, "config_view", lambda *a, **k: {"backend_url": "http://127.0.0.1:11434/v1", "chat_model": "m"})
+    monkeypatch.setattr(webapp, "health_service", lambda *a, **k: {"ok": True, "provider": "mettle", "models": ["fake"]})
+    monkeypatch.setattr(webapp, "capacity_stats", lambda *a, **k: {"remaining_documents_est": 1})
     client = _client()
 
     corpus = client.get("/api/corpus").json()
@@ -67,6 +71,29 @@ def test_api_corpus_and_config(monkeypatch):
 
     overview = client.get("/api/overview").json()
     assert overview["health"]["ok"] is True and overview["totals"]["documents"] == 1
+
+
+def test_overview_loads_corpus_exactly_once(monkeypatch):
+    # api_overview used to call corpus_stats() then capacity_stats() (which
+    # itself calls corpus_stats() again) with no shared state, costing two
+    # Corpus.load()s per request. It now loads the corpus once and passes it
+    # down to both read models.
+    monkeypatch.setattr(webapp, "health_service", lambda *a, **k: {"ok": True, "provider": "mettle"})
+
+    calls = {"n": 0}
+    orig_load = Corpus.load.__func__
+
+    def counting_load(cls, path):
+        calls["n"] += 1
+        return orig_load(cls, path)
+
+    monkeypatch.setattr(Corpus, "load", classmethod(counting_load))
+    client = _client()
+
+    r = client.get("/api/overview")
+    assert r.status_code == 200
+    assert calls["n"] == 1
+
 
 def test_ingest_status_when_idle():
     client = _client()

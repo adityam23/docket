@@ -19,7 +19,6 @@
 
 	let traces = $state(null);
 	let chats = $state(null);
-	let overview = $state(null);
 	let error = $state('');
 	let openId = $state('');
 	let full = $state({});
@@ -30,10 +29,9 @@
 
 	async function refresh() {
 		try {
-			[traces, chats, overview] = await Promise.all([
+			[traces, chats] = await Promise.all([
 				api.traces().then((r) => r.traces),
-				api.chats().then((r) => r.chats).catch(() => []),
-				api.overview().catch(() => null)
+				api.chats().then((r) => r.chats).catch(() => [])
 			]);
 		} catch (e) {
 			error = errMsg(e);
@@ -93,8 +91,11 @@
 		}
 	}
 
-	// The DE pipeline is present only if the backend reports it — otherwise absent.
-	let pipeline = $derived(overview?.pipeline || null);
+	// The DE pipeline is a self-host-only capability the backend has never
+	// produced a field for — this pivot is an honest, permanently-empty state
+	// until a real freshness/throughput endpoint exists to bind to (never a
+	// fetch kept alive just to read a key that's never populated).
+	const pipeline = null;
 
 	// Traces that belong to a chat fold under that chat; one-shots stay flat.
 	let loneTraces = $derived(

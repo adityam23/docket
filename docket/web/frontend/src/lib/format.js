@@ -25,18 +25,18 @@ export function basename(p) {
 }
 
 // Filing-aware citation label. Backend citations/hits carry at least doc_id +
-// page; when the corpus grows richer filing metadata (form type, company,
-// ticker, fiscal period — TODO T22) we compose "10-K · Acme · FY2023 · p.42".
-// Absent that metadata we degrade honestly to "<doc_id> · p.<page>" — never
-// invent a form or period we weren't given. One place so Ask, the drawer and
-// traces agree.
+// page, and optionally form_type/company/ticker/fiscal_period once the corpus
+// has that filing metadata — we compose "10-K · Acme · FY2023 · p.42". Absent
+// that metadata we degrade honestly to "<doc_id> · p.<page>" — never invent a
+// form or period we weren't given. One place so Ask, the drawer and traces agree.
 export function filingCite(c) {
 	if (!c) return '';
 	const parts = [];
-	if (c.form) parts.push(c.form); // e.g. 10-K, 10-Q, 8-K
+	if (c.form_type) parts.push(c.form_type); // e.g. 10-K, 10-Q, 8-K
 	if (c.company) parts.push(c.company);
-	else if (!c.form && c.doc_id) parts.push(c.doc_id);
-	if (c.fiscal) parts.push(c.fiscal); // e.g. FY2023
+	else if (c.ticker) parts.push(c.ticker);
+	else if (!c.form_type && c.doc_id) parts.push(c.doc_id);
+	if (c.fiscal_period) parts.push(c.fiscal_period); // e.g. FY2023
 	if (c.page !== undefined && c.page !== null) parts.push(`p.${c.page}`);
 	return parts.join(' · ');
 }
@@ -113,19 +113,18 @@ export function when(iso) {
 
 // Ingest / document stage → chip tone + human label. Monochrome discipline:
 // green/amber stay reserved for reliability — progress reads via info/accent,
-// and only hard errors take red.
+// and only hard errors take red. Stages mirror the pipeline exactly: a job
+// document walks ocr → chunk → post → done/skipped/failed; once its lineage
+// is persisted the corpus reports it as the resting "indexed" state.
 export const STAGE = {
 	queued: { tone: 'neutral', label: 'Queued' },
 	ocr: { tone: 'info', label: 'OCR / extract' },
 	chunk: { tone: 'info', label: 'Chunking' },
-	embed: { tone: 'accent', label: 'Embedding' },
-	index: { tone: 'accent', label: 'Indexing' },
-	indexed: { tone: 'neutral', label: 'Indexed (sparse)' },
-	embedded: { tone: 'accent', label: 'Embedded (hybrid)' },
-	embedding: { tone: 'accent', label: 'Embedding' },
+	post: { tone: 'accent', label: 'Posting to engine' },
+	indexed: { tone: 'neutral', label: 'Indexed' },
 	done: { tone: 'info', label: 'Done' },
 	skipped: { tone: 'neutral', label: 'Skipped' },
-	error: { tone: 'bad', label: 'Error' }
+	failed: { tone: 'bad', label: 'Failed' }
 };
 
 export function stage(s) {
