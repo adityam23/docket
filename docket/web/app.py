@@ -75,7 +75,7 @@ app = FastAPI(title="docket", version="0.2.0")
 #    names. A rebound hostname fails here, before any route runs — closing the
 #    vector that would otherwise let a rebinding page ride this server's
 #    forwarded ``Authorization: Bearer <engine_key>`` to the engine.
-# 2. `_csrf_guard` rejects state-changing requests (every method but
+# 2. `_CSRFGuard` rejects state-changing requests (every method but
 #    GET/HEAD/OPTIONS, plus the side-effecting `GET /api/ask/stream`) whose
 #    declared origin is cross-site. It prefers the `Origin` header (sent by
 #    every browser cross-origin fetch/form-post); when `Origin` is absent it
@@ -84,12 +84,6 @@ app = FastAPI(title="docket", version="0.2.0")
 #    — nothing is enforcing same-origin on those callers for an attacker page
 #    to spoof, so there is no signal to check.
 #
-# TestClient's default Host is "testserver" — not a real loopback name, so it
-# would otherwise fail check 1 for the whole existing test suite. Tests opt it
-# into the allowlist via DOCKET_TEST_TRUSTED_HOST, set once at collection time
-# by tests/conftest.py (before any test module imports this module and bakes
-# the middleware's allowed_hosts) — deliberately not a `DK_` Settings field, so
-# production's allowlist is never configurable away from the real loopback set.
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 # A safe method that is nonetheless side-effecting (runs inference, persists a
 # trace) and so needs the same cross-site guard as a state-changing method.
@@ -103,18 +97,28 @@ def _is_cross_site(request: Request) -> bool:
     return request.headers.get("sec-fetch-site") == "cross-site"
 
 
-@app.middleware("http")
-async def _csrf_guard(request: Request, call_next):
-    guarded = request.method not in _SAFE_METHODS or request.url.path in _CSRF_GUARDED_SAFE_PATHS
-    if guarded and _is_cross_site(request):
-        return PlainTextResponse("cross-site request blocked", status_code=403)
-    return await call_next(request)
+class _CSRFGuard:
+    """Pure ASGI (not ``BaseHTTPMiddleware``), so the long-lived SSE streams
+    pass through untouched and keep their client-disconnect semantics."""
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] == "http":
+            request = Request(scope)
+            guarded = (request.method not in _SAFE_METHODS
+                       or request.url.path in _CSRF_GUARDED_SAFE_PATHS)
+            if guarded and _is_cross_site(request):
+                response = PlainTextResponse("cross-site request blocked", status_code=403)
+                await response(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
 
 
-_allowed_hosts = ["127.0.0.1", "localhost", "::1", "[::1]"]
-if _test_host := os.environ.get("DOCKET_TEST_TRUSTED_HOST"):
-    _allowed_hosts.append(_test_host)
-app.add_middleware(TrustedHostMiddleware, allowed_hosts=_allowed_hosts)
+# Added last = outermost: a foreign Host is rejected before the CSRF check runs.
+app.add_middleware(_CSRFGuard)
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "::1", "[::1]"])
 
 
 @app.on_event("startup")

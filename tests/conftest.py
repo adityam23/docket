@@ -17,15 +17,6 @@ import pytest
 from docket import config_write
 from docket.config import Settings
 
-# Opt TestClient's default Host ("testserver") into docket.web.app's
-# TrustedHostMiddleware allowlist. This MUST run before any test module
-# imports docket.web.app (that import bakes the middleware's allowed_hosts at
-# construction time) — module-level code in conftest.py runs once, at
-# collection, before pytest imports any test module in this directory, so this
-# is the one place that ordering is guaranteed. Deliberately not a `DK_`
-# Settings field: production's host allowlist stays fixed to the real
-# loopback names, never configurable away from them.
-os.environ.setdefault("DOCKET_TEST_TRUSTED_HOST", "testserver")
 
 
 @pytest.fixture(autouse=True)

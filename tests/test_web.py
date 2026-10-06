@@ -11,6 +11,12 @@ from docket.report.schema import Citation
 import docket.web.app as webapp
 
 
+def _client() -> TestClient:
+    # A real loopback Host: the app's TrustedHostMiddleware rejects anything
+    # else (incl. TestClient's default "testserver").
+    return TestClient(webapp.app, base_url="http://127.0.0.1")
+
+
 def test_ask_endpoint(monkeypatch):
     fake = Answer(
         question="What was revenue?",
@@ -24,7 +30,7 @@ def test_ask_endpoint(monkeypatch):
     monkeypatch.setattr(
         webapp, "ask_traced_service", lambda q, on_step=None, session_id=None: (fake, trace)
     )
-    client = TestClient(webapp.app)
+    client = _client()
     r = client.post("/ask", json={"question": "What was revenue?"})
     assert r.status_code == 200
     body = r.json()
@@ -38,7 +44,7 @@ def test_ask_endpoint(monkeypatch):
 def test_index_page_served():
     # Serves the SvelteKit SPA when built, else the "not built" fallback — either
     # way the primary surface responds 200 (docs/decisions Q12).
-    client = TestClient(webapp.app)
+    client = _client()
     r = client.get("/")
     assert r.status_code == 200
 
@@ -51,7 +57,7 @@ def test_api_corpus_and_config(monkeypatch):
     monkeypatch.setattr(webapp, "config_view", lambda: {"backend_url": "http://127.0.0.1:11434/v1", "chat_model": "m"})
     monkeypatch.setattr(webapp, "health_service", lambda: {"ok": True, "provider": "mettle", "models": ["fake"]})
     monkeypatch.setattr(webapp, "capacity_stats", lambda: {"remaining_documents_est": 1})
-    client = TestClient(webapp.app)
+    client = _client()
 
     corpus = client.get("/api/corpus").json()
     assert corpus["totals"]["chunks"] == 3 and corpus["retrieval"]["mode"] == "hybrid"
@@ -63,13 +69,13 @@ def test_api_corpus_and_config(monkeypatch):
     assert overview["health"]["ok"] is True and overview["totals"]["documents"] == 1
 
 def test_ingest_status_when_idle():
-    client = TestClient(webapp.app)
+    client = _client()
     body = client.get("/api/ingest/status").json()
     assert body["running"] is False and "job" in body
 
 
 def test_ingest_rejects_bad_folder():
-    client = TestClient(webapp.app)
+    client = _client()
     r = client.post("/api/ingest", json={"folder": "/no/such/folder/xyz"})
     assert r.status_code == 400
 
@@ -77,7 +83,7 @@ def test_ingest_rejects_bad_folder():
 def test_remove_document_endpoint(monkeypatch):
     monkeypatch.setattr(webapp.JOBS, "is_running", lambda: False)
     monkeypatch.setattr(webapp, "remove_document", lambda doc_id: 4)
-    client = TestClient(webapp.app)
+    client = _client()
 
     r = client.delete("/api/corpus/d1")
     assert r.status_code == 200 and r.json()["removed_chunks"] == 4
@@ -93,7 +99,7 @@ def test_samples_endpoint(monkeypatch):
     monkeypatch.setattr(webapp.JOBS, "is_running", lambda: False)
     monkeypatch.setattr(webapp, "load_samples", lambda: None)
     monkeypatch.setattr(webapp, "corpus_stats", lambda: {"totals": {"documents": 2, "chunks": 5}})
-    client = TestClient(webapp.app)
+    client = _client()
     r = client.post("/api/samples/load")
     assert r.status_code == 200 and r.json()["totals"]["documents"] == 2
 
@@ -103,7 +109,7 @@ def test_capacity_endpoint(monkeypatch):
         webapp, "capacity_stats",
         lambda: {"remaining_documents_est": 123, "device": {"disk_free_bytes": 1}},
     )
-    client = TestClient(webapp.app)
+    client = _client()
     r = client.get("/api/capacity")
     assert r.status_code == 200 and r.json()["remaining_documents_est"] == 123
 
@@ -122,7 +128,7 @@ def test_upload_endpoint(monkeypatch):
         return FakeJob()
 
     monkeypatch.setattr(webapp.JOBS, "start_uploads", fake_start_uploads)
-    client = TestClient(webapp.app)
+    client = _client()
     payload = {"files": [{"name": "a.pdf", "content_b64": base64.b64encode(b"%PDF-1.4 hi").decode()}]}
     r = client.post("/api/ingest/upload", json=payload)
     assert r.status_code == 200 and r.json()["id"] == "job-9"
@@ -131,7 +137,7 @@ def test_upload_endpoint(monkeypatch):
 
 def test_upload_rejects_bad_base64(monkeypatch):
     monkeypatch.setattr(webapp.JOBS, "start_uploads", lambda files, settings=None: None)
-    client = TestClient(webapp.app)
+    client = _client()
     r = client.post("/api/ingest/upload", json={"files": [{"name": "a.pdf", "content_b64": "not!!b64"}]})
     assert r.status_code == 400
 
@@ -143,7 +149,7 @@ def test_upload_rejects_oversize_file(monkeypatch):
 
     monkeypatch.setattr(webapp, "_MAX_FILE_BYTES", 10)
     monkeypatch.setattr(webapp.JOBS, "start_uploads", lambda files, settings=None: None)
-    client = TestClient(webapp.app)
+    client = _client()
     payload = {"files": [{"name": "big.pdf", "content_b64": base64.b64encode(b"x" * 11).decode()}]}
     r = client.post("/api/ingest/upload", json=payload)
     assert r.status_code == 413 and "big.pdf" in r.json()["detail"]
@@ -153,7 +159,7 @@ def test_config_patch_endpoint(monkeypatch):
     called = {}
     monkeypatch.setattr(webapp, "update_config", lambda updates: called.setdefault("u", updates))
     monkeypatch.setattr(webapp, "config_view", lambda: {"chat_model": "m"})
-    client = TestClient(webapp.app)
+    client = _client()
     r = client.patch("/api/config", json={"updates": {"chat_model": "m"}})
     assert r.status_code == 200 and called["u"] == {"chat_model": "m"}
 
@@ -163,7 +169,7 @@ def test_config_patch_rejects_invalid(monkeypatch):
         raise webapp.ConfigWriteError("bad key")
 
     monkeypatch.setattr(webapp, "update_config", boom)
-    client = TestClient(webapp.app)
+    client = _client()
     r = client.patch("/api/config", json={"updates": {"x": 1}})
     assert r.status_code == 422 and "bad key" in r.json()["detail"]
 
@@ -173,7 +179,7 @@ def test_keys_endpoint_never_echoes_secret(monkeypatch):
     monkeypatch.setattr(webapp, "set_secret", lambda p, v: store.update({p: v}))
     monkeypatch.setattr(webapp, "clear_secret", lambda p: store.pop(p, None))
     monkeypatch.setattr(webapp, "secret_status", lambda: {"engine": "engine" in store})
-    client = TestClient(webapp.app)
+    client = _client()
 
     r = client.post("/api/config/keys", json={"provider": "engine", "value": "sk-secret"})
     assert r.status_code == 200
@@ -206,7 +212,7 @@ def test_traces_endpoints(monkeypatch):
 
     store = FakeStore()
     monkeypatch.setattr(webapp, "trace_store", lambda: store)
-    client = TestClient(webapp.app)
+    client = _client()
     assert client.get("/api/traces").json()["traces"][0]["id"] == "t1"
     assert client.get("/api/traces/t1").json()["id"] == "t1"
     assert client.get("/api/traces/nope").status_code == 404
@@ -229,7 +235,7 @@ def test_ask_stream_emits_steps_and_done(monkeypatch):
         return fake, trace
 
     monkeypatch.setattr(webapp, "ask_traced_service", fake_traced)
-    client = TestClient(webapp.app)
+    client = _client()
     with client.stream("GET", "/api/ask/stream", params={"question": "q"}) as r:
         assert r.headers["content-type"].startswith("text/event-stream")
         body = "".join(r.iter_text())
@@ -282,7 +288,7 @@ def test_ask_with_session_threads_and_returns_chat_id(monkeypatch):
 
     monkeypatch.setattr(webapp, "ask_traced_service", fake_traced)
     monkeypatch.setattr(webapp, "chat_store", lambda: _FakeChats([{"id": "chat-1", "turns": []}]))
-    client = TestClient(webapp.app)
+    client = _client()
 
     r = client.post("/api/ask", json={"question": "And vs last year?", "session_id": "chat-1"})
     assert r.status_code == 200
@@ -294,7 +300,7 @@ def test_ask_with_session_threads_and_returns_chat_id(monkeypatch):
 def test_ask_unknown_session_is_404(monkeypatch):
     monkeypatch.setattr(webapp, "ask_traced_service", lambda q, on_step=None, session_id=None: None)
     monkeypatch.setattr(webapp, "chat_store", lambda: _FakeChats([]))
-    client = TestClient(webapp.app)
+    client = _client()
 
     r = client.post("/api/ask", json={"question": "q", "session_id": "nope"})
     assert r.status_code == 404 and "nope" in r.json()["detail"]
@@ -317,7 +323,7 @@ def test_stream_passes_session_to_service(monkeypatch):
 
     monkeypatch.setattr(webapp, "ask_traced_service", fake_traced)
     monkeypatch.setattr(webapp, "chat_store", lambda: _FakeChats([{"id": "c9", "turns": []}]))
-    client = TestClient(webapp.app)
+    client = _client()
 
     with client.stream("GET", "/api/ask/stream", params={"question": "q", "session_id": "c9"}) as r:
         body = "".join(r.iter_text())
@@ -343,7 +349,7 @@ def test_chats_endpoints(monkeypatch):
 
     traces = _FakeTraces()
     monkeypatch.setattr(webapp, "trace_store", lambda: traces)
-    client = TestClient(webapp.app)
+    client = _client()
 
     listing = client.get("/api/chats").json()
     assert listing["chats"][0]["id"] == "chat-a" and listing["chats"][0]["title"] == "first question"
@@ -364,14 +370,14 @@ def test_chats_endpoints(monkeypatch):
 
 def test_foreign_host_header_is_rejected():
     # A DNS-rebound hostname pointed at 127.0.0.1 must not be served.
-    client = TestClient(webapp.app)
+    client = _client()
     r = client.get("/api/health", headers={"host": "evil.example.com"})
     assert r.status_code == 400
 
 
 def test_loopback_host_headers_pass(monkeypatch):
     monkeypatch.setattr(webapp, "health_service", lambda: {"ok": True})
-    client = TestClient(webapp.app)
+    client = _client()
     for host in ("127.0.0.1", "127.0.0.1:8760", "localhost", "localhost:8760"):
         r = client.get("/api/health", headers={"host": host})
         assert r.status_code == 200, host
@@ -381,7 +387,7 @@ def test_cross_site_origin_on_patch_config_is_rejected():
     # CSRF: the request targets this server correctly (Host is fine) but was
     # declared by a different site -- must be blocked before it ever reaches
     # update_config.
-    client = TestClient(webapp.app)
+    client = _client()
     r = client.patch(
         "/api/config",
         json={"updates": {}},
@@ -392,7 +398,7 @@ def test_cross_site_origin_on_patch_config_is_rejected():
 
 def test_cross_site_sec_fetch_site_without_origin_is_rejected():
     # Falls back to Sec-Fetch-Site when Origin is absent.
-    client = TestClient(webapp.app)
+    client = _client()
     r = client.post("/api/engine/restart", headers={"sec-fetch-site": "cross-site"})
     assert r.status_code == 403
 
@@ -400,7 +406,7 @@ def test_cross_site_sec_fetch_site_without_origin_is_rejected():
 def test_ask_stream_cross_site_get_is_rejected():
     # GET but side-effecting (inference + a persisted trace) -> guarded like a
     # state-changing request.
-    client = TestClient(webapp.app)
+    client = _client()
     r = client.get(
         "/api/ask/stream",
         params={"question": "q"},
@@ -412,11 +418,11 @@ def test_ask_stream_cross_site_get_is_rejected():
 def test_same_origin_patch_config_passes(monkeypatch):
     monkeypatch.setattr(webapp, "update_config", lambda updates: None)
     monkeypatch.setattr(webapp, "config_view", lambda: {"chat_model": "m"})
-    client = TestClient(webapp.app)
+    client = _client()
     r = client.patch(
         "/api/config",
         json={"updates": {"chat_model": "m"}},
-        headers={"origin": "http://testserver"},
+        headers={"origin": "http://127.0.0.1"},
     )
     assert r.status_code == 200
 
@@ -426,7 +432,7 @@ def test_absent_origin_and_sec_fetch_site_passes(monkeypatch):
     # same-origin for these callers, so there is no signal to check.
     monkeypatch.setattr(webapp, "update_config", lambda updates: None)
     monkeypatch.setattr(webapp, "config_view", lambda: {"chat_model": "m"})
-    client = TestClient(webapp.app)
+    client = _client()
     r = client.patch("/api/config", json={"updates": {"chat_model": "m"}})
     assert r.status_code == 200
 
@@ -440,7 +446,7 @@ def test_chat_create_endpoint(monkeypatch):
             return {"id": chat_id, "title": title, "created_at": now, "updated_at": now, "turns": []}
 
     monkeypatch.setattr(webapp, "chat_store", lambda: _Store())
-    client = TestClient(webapp.app)
+    client = _client()
     r = client.post("/api/chats", json={"title": None})
     assert r.status_code == 200 and r.json()["id"] == "chat-new-1" and r.json()["turns"] == []
     assert r.json()["title"] == ""  # untitled until the first turn names it
