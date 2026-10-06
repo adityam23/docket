@@ -71,11 +71,13 @@ smoke_sidecar() {
   done
   sleep 2  # let the supervisor spawn the (never-answering) fake engine
   fakepid=$(cat "$fake_dir/fake.pid" 2>/dev/null || true)
-  if [ -n "$fakepid" ] && [ -d "/proc/$fakepid" ]; then
+  # /proc is Linux-only; kill -0 (liveness probe, no signal delivered) is
+  # portable across Linux and macOS.
+  if [ -n "$fakepid" ] && kill -0 "$fakepid" 2>/dev/null; then
     kill -TERM "$spid" 2>/dev/null || true
     for _ in $(seq 1 20); do kill -0 "$spid" 2>/dev/null || break; sleep 0.5; done
     sleep 1
-    if [ -d "/proc/$fakepid" ]; then
+    if kill -0 "$fakepid" 2>/dev/null; then
       echo "smoke: engine group SURVIVED sidecar quit (pid $fakepid)" >&2
       kill -9 "$fakepid" 2>/dev/null || true
       fail=1

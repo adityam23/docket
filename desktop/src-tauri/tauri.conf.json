@@ -4,7 +4,7 @@
 	"version": "0.2.0",
 	"identifier": "app.docket.desktop",
 	"build": {
-		"frontendDist": "../docket/web/frontend/build"
+		"frontendDist": "../../docket/web/frontend/build"
 	},
 	"app": {
 		"windows": [],

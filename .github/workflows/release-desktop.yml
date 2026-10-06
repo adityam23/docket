@@ -43,6 +43,13 @@ jobs:
         run: uv run pytest -q
       - name: Supervision lifecycle smoke
         run: timeout 300 uv run python benchmarks/smoke_supervision.py
+      # resources/ is gitignored (fetched/built per-matrix in the desktop job),
+      # but tauri-build's resource-copy step runs on every `cargo check` (not
+      # just `tauri build`) and errors if these dirs don't exist on disk.
+      - name: Stub bundle resources
+        run: |
+          mkdir -p desktop/src-tauri/resources/server/docket-server
+          mkdir -p desktop/src-tauri/resources/engine
       - name: Rust shell compiles
         working-directory: desktop/src-tauri
         run: cargo check
@@ -109,7 +116,11 @@ jobs:
       # --- shell ---------------------------------------------------------------
       - name: Build desktop bundle (unsigned)
         working-directory: desktop/src-tauri
-        run: npx --yes @tauri-apps/cli@latest build
+        # Pinned to the `tauri` version vendored in Cargo.lock (2.11.5): the
+        # npm CLI and the Rust `tauri` crate are released in lockstep, and an
+        # unpinned `@latest` can drift ahead of the generator/runtime this
+        # crate actually links against.
+        run: npx --yes @tauri-apps/cli@2.11.5 build
 
       - name: Collect artifacts
         run: |
@@ -119,7 +130,22 @@ jobs:
             -exec cp {} release/ \;
           ls -la release/
 
+      # Tag builds: publish straight to the tag's GitHub Release (the
+      # no-updater decision means users fetch bundles from Releases, not CI
+      # artifacts). release.yml creates/updates that same release off the
+      # same tag push; softprops/action-gh-release retries as an update on
+      # the "already_exists" 422 it gets if that job wins the race to create
+      # it first, so running both against the same tag is safe either order.
+      - name: Publish to GitHub Release
+        if: github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+
+      # workflow_dispatch runs (manual, exploratory): no tag/release to
+      # attach to, so keep the 90-day artifact for download.
       - uses: actions/upload-artifact@v4
+        if: github.event_name == 'workflow_dispatch'
         with:
           name: docket-desktop-${{ matrix.os }}
           path: release/*
