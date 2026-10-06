@@ -137,23 +137,6 @@ fn spawn_server(resources: &PathBuf) -> std::io::Result<(Child, u16)> {
         }
     }
     let child = cmd.spawn()?;
-    Ok((child, port))
-}
-
-/// `spawn_server`, retried once with a freshly probed port.
-///
-/// `free_port()` binds, reads the port, and drops the listener before the
-/// sidecar binds that same port itself — a narrow window in which another
-/// process can steal it. That race surfaces as the sidecar exiting almost
-/// immediately instead of ever becoming healthy; detect that and retry once.
-fn spawn_server_retrying(resources: &PathBuf) -> std::io::Result<(Child, u16)> {
-    let (mut child, mut port) = spawn_server(resources)?;
-    std::thread::sleep(Duration::from_millis(300));
-    if matches!(child.try_wait(), Ok(Some(_))) {
-        let (c2, p2) = spawn_server(resources)?;
-        child = c2;
-        port = p2;
-    }
     CHILD_PID.store(child.id() as i32, Ordering::SeqCst);
     Ok((child, port))
 }
@@ -224,13 +207,24 @@ fn main() {
         .manage(ServerHandle(Mutex::new(None)))
         .setup(|app| {
             let resources = app.path().resource_dir()?;
-            let (mut child, port) = spawn_server_retrying(&resources)
-                .map_err(|e| format!("failed to spawn docket-server sidecar: {e}"))?;
+            let spawn = |r: &PathBuf| {
+                spawn_server(r).map_err(|e| format!("failed to spawn docket-server sidecar: {e}"))
+            };
+            let (mut child, mut port) = spawn(&resources)?;
+            let mut respawned = false;
 
             let deadline = Instant::now() + Duration::from_secs(30);
             while Instant::now() < deadline {
                 if health_ok(port) {
                     break;
+                }
+                // free_port() drops its listener before the sidecar binds, so
+                // another process can steal the port; the sidecar then exits
+                // (after its multi-second frozen startup). Retry once on a
+                // fresh port.
+                if !respawned && matches!(child.try_wait(), Ok(Some(_))) {
+                    (child, port) = spawn(&resources)?;
+                    respawned = true;
                 }
                 std::thread::sleep(Duration::from_millis(250));
             }
