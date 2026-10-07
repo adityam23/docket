@@ -65,3 +65,31 @@ def test_retrieval_k_default_is_40():
 def test_frozen_build_never_adopts_the_checkout_root(monkeypatch):
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     assert config_module._project_root() is None
+
+
+def test_engine_phase_profile_names_default_and_validate(monkeypatch):
+    s = Settings()
+    assert (s.engine_retrieval_profile, s.engine_chat_profile) == ("retrieval", "chat")
+
+    for bad in (".leading-dot", "has space", "has/slash", "a" * 129):
+        with pytest.raises(ValidationError):
+            Settings(engine_retrieval_profile=bad)
+        with pytest.raises(ValidationError):
+            Settings(engine_chat_profile=bad)
+
+    # Empty is the documented opt-out (disables phase switching), not rejected.
+    s2 = Settings(engine_retrieval_profile="", engine_chat_profile="")
+    assert (s2.engine_retrieval_profile, s2.engine_chat_profile) == ("", "")
+
+
+def test_engine_switch_timeout_s_must_be_positive():
+    with pytest.raises(ValidationError):
+        Settings(engine_switch_timeout_s=0.0)
+    assert Settings(engine_switch_timeout_s=5.0).engine_switch_timeout_s == 5.0
+
+
+def test_default_chat_model_is_the_financebench_winner():
+    # Operator decision (D5 background): the distill, not the lighter
+    # all-in-one code default -- the two-profile engine no longer needs a
+    # chat model small enough to co-reside with embed/rerank.
+    assert Settings().chat_model == "qwen35-4b-opus-distill"

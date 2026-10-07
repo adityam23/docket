@@ -10,6 +10,7 @@ the whole backend boundary (cutover contract, 2026-09-10).
 from __future__ import annotations
 
 import os
+import re
 import sys
 from enum import Enum
 from pathlib import Path
@@ -82,9 +83,12 @@ class Settings(BaseSettings):
     # OpenAI-/v1 base URL of the engine (mettle). The ONLY supported backend:
     # chat, embeddings, rerank and collection search all ride this one base.
     backend_url: str = "http://127.0.0.1:11434/v1"
-    chat_model: str = "gemma4:e2b"  # e2b (not e4b) so chat + embed + OCR
-    #                                 co-reside in 6 GB VRAM on an all-in-one
-    #                                 engine.
+    chat_model: str = "qwen35-4b-opus-distill"  # the measured FinanceBench
+    #   winner (82.0% full-RAG @ 10 chunks) and the `chat` profile's only
+    #   slot (residency contract D5) -- chat and embed/rerank no longer need
+    #   to co-reside: mettle's 6 GB config switches between a `retrieval`
+    #   profile (embed + rerank) and this `chat` profile per phase, see
+    #   engine_retrieval_profile/engine_chat_profile below and docket/phase.py.
 
     # Embeddings and rerank are UNCONDITIONAL engine features — mettle serves
     # them on the same /v1 base as chat. Only the model aliases are tunable;
@@ -106,6 +110,24 @@ class Settings(BaseSettings):
     # default — this ceiling exists so a binary that NEVER answers can't hold
     # "starting" forever.
     engine_startup_window_s: float = Field(900.0, gt=0)
+
+    # Engine phase coordination (residency contract D5): mettle's 6 GB config
+    # can't keep embed+rerank and the chat generator resident together, so it
+    # ships two profiles and docket switches between them per phase via the
+    # ONE coordinator (docket/phase.py), applied per-call by every provider
+    # built through providers/router.py. Empty ("") for EITHER name disables
+    # switching entirely -- a single-profile engine, coordinator is a no-op.
+    # Validated with the same pattern mettle enforces for collection names
+    # (empty is the one exception). Not web-writable: an engine-topology
+    # decision, not a Settings-page knob (config_write.WRITABLE_FIELDS).
+    engine_retrieval_profile: str = "retrieval"
+    engine_chat_profile: str = "chat"
+    # How long a phase switch (PUT + poll /engine/ready + verify /engine/status
+    # active/!switching) may take before the coordinator gives up and raises
+    # loudly (docket/engine.py EngineSwitchError) instead of hanging forever.
+    # Measured switch cost on the reference card is ~2 s; this is a generous
+    # ceiling, not the expected latency.
+    engine_switch_timeout_s: float = Field(120.0, gt=0)
 
     request_timeout_s: float = Field(120.0, gt=0)
 
@@ -132,6 +154,21 @@ class Settings(BaseSettings):
                 f"chunk_overlap ({self.chunk_overlap}) must be less than "
                 f"chunk_words ({self.chunk_words})"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_engine_phase_profiles(self) -> "Settings":
+        """Same name rule as ``engine_collection`` (mettle's collection-name
+        contract), with one exception: empty is the documented opt-out that
+        disables phase switching (docket/phase.py), so it can't share the
+        field's own ``pattern=`` (which requires 1-128 chars)."""
+        for field in ("engine_retrieval_profile", "engine_chat_profile"):
+            value = getattr(self, field)
+            if value and not re.fullmatch(_COLLECTION_NAME_PATTERN, value):
+                raise ValueError(
+                    f"{field} ({value!r}) must match {_COLLECTION_NAME_PATTERN!r} "
+                    "or be empty (disables phase switching)"
+                )
         return self
 
 

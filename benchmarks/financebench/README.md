@@ -54,8 +54,8 @@ now fires only on **bare-figure** golds — see `docket/eval/financebench.py`
 
 | generator | oracle (gold context) | full-RAG @6 |
 |---|---|---|
-| **qwen35-4b Opus-distill** | **80.7%** (121/150) | **68.0%** (102/150) |
-| `gemma4:e2b` (deployed default) | **55.3%** (83/150) | **40.0%** (60/150) |
+| **qwen35-4b Opus-distill** (deployed default) | **80.7%** (121/150) | **68.0%** (102/150) |
+| `gemma4:e2b` | **55.3%** (83/150) | **40.0%** (60/150) |
 
 Generator quality gap **+25.4 pt** (oracle); full-RAG gap **+28.0 pt**; retrieval cost
 (oracle→RAG) qwen −12.7 / gemma −15.3 pt. Anchor: the paper's shared-vault retrieval

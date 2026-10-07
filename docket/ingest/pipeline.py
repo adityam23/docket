@@ -197,11 +197,21 @@ def ingest_paths(
     ingest, or pass ``skip_existing=False`` to force a re-run.
 
     ``between_documents`` (optional) is called once after EVERY document
-    finishes — done, skipped, or failed — before the next one starts. It is
-    the ONE seam a future ticket can hook to pause a long-running batch between
-    documents (e.g. to let a live question preempt ingest and switch the
-    engine's profile); this ticket adds only the seam, not any pause behaviour.
-    Defaults to a no-op.
+    finishes — done, skipped, or failed — before the next one starts.
+
+    Resolved (D5/phase coordinator ticket): this seam is kept as a no-op
+    hook, deliberately NOT wired to a pause/preempt behaviour. Ask-preempts-
+    ingest is already provided at finer (per-chunk, not per-document)
+    granularity by ``providers/router.py``'s per-call phase wrapping --
+    every ``post_document``/``delete_document`` call independently enters the
+    RETRIEVAL phase via the coordinator, and a waiting chat request already
+    blocks new RETRIEVAL entrants from the next chunk's POST (see
+    ``docket/phase.py``). Pausing the whole batch here on top of that would
+    be a second, coarser preemption mechanism for the same job -- CLAUDE.md:
+    one concept, one implementation. The seam stays for a genuinely different
+    future need (e.g. an operator-initiated "pause this ingest job" button),
+    not for engine-phase preemption, which needs no additional hook. Defaults
+    to a no-op.
     """
     s = settings or load_settings()
     # NB: `corpus or Corpus()` would discard a passed-in *empty* corpus (len 0 is

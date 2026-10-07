@@ -120,6 +120,75 @@ def engine_activate(settings: Settings, name: str) -> tuple[int, dict]:
     return resp.status_code, body
 
 
+class EngineSwitchError(RuntimeError):
+    """A profile switch (:func:`switch_profile`) was rejected outright by the
+    engine, or did not confirm within the bounded wait. Raised instead of
+    treating the activation's bare 202 as "done" or retrying forever —
+    residency contract D5 is explicit that 202 is accepted, NOT finished, and
+    CLAUDE.md's backend boundary means an unreachable/misbehaving engine
+    fails loudly rather than degrading silently."""
+
+
+def read_status_meta(settings: Settings) -> tuple[str | None, bool | None]:
+    """``(active, switching)`` from ``/engine/status`` -- the always-200
+    liveness read that additionally carries which profile is active and
+    whether a switch is in flight (mettle, 2026-10-07). ``(None, None)`` when
+    the engine is unreachable or the body is malformed; callers treat that as
+    "unknown", never as a specific profile. The ONE place this pair is parsed
+    (CLAUDE.md reusability) -- :class:`EngineSupervisor` and
+    :mod:`docket.phase`'s coordinator both read through here instead of each
+    re-parsing ``/engine/status`` themselves."""
+    resp = _get(settings, "/engine/status", timeout=5.0)
+    if resp is None or resp.status_code != 200:
+        return None, None
+    try:
+        body = resp.json()
+    except ValueError:
+        return None, None
+    return body.get("active"), body.get("switching")
+
+
+def switch_profile(settings: Settings, target: str, *, timeout_s: float | None = None) -> None:
+    """Activate ``target`` and block until the engine actually serves it
+    (residency contract D5), reusing :func:`_put`/:func:`_get` like every
+    other engine call: ``PUT /engine/profiles/active`` (202 accepted, or 409
+    if a switch to the same target is already in flight from elsewhere --
+    both mean "proceed to confirmation", NOT "done"), then poll
+    ``GET /engine/ready`` until 200 AND ``GET /engine/status`` confirms
+    ``active == target`` and ``switching`` is false. The ``/engine/status``
+    cross-check is load-bearing, not redundant: mettle's readiness gates on
+    ``switching`` (2026-10-06 fix) precisely because an engine built before
+    that fix could answer ``/engine/ready`` 200 for the OUTGOING profile
+    mid-switch.
+
+    Raises :class:`EngineSwitchError` if the engine rejects the switch
+    outright, or if confirmation doesn't land within ``timeout_s`` (default
+    ``settings.engine_switch_timeout_s``) -- fail loud, never silently retry
+    forever or declare success on a timed-out switch. Callers (the phase
+    coordinator) must only call this with no request of the OUTGOING phase
+    in flight (D5: "never switch with a request in flight").
+    """
+    timeout = settings.engine_switch_timeout_s if timeout_s is None else timeout_s
+    code, body = engine_activate(settings, target)
+    if code not in (200, 202, 409):
+        raise EngineSwitchError(
+            f"engine rejected switch to profile {target!r}: HTTP {code} {body}"
+        )
+    deadline = time.monotonic() + timeout
+    while True:
+        ready = _get(settings, "/engine/ready", timeout=5.0)
+        if ready is not None and ready.status_code == 200:
+            active, switching = read_status_meta(settings)
+            if active == target and not switching:
+                return
+        if time.monotonic() >= deadline:
+            raise EngineSwitchError(
+                f"profile switch to {target!r} did not confirm within {timeout}s "
+                "(engine_switch_timeout_s)"
+            )
+        time.sleep(0.2)
+
+
 async def engine_events_stream(settings: Settings) -> AsyncIterator[dict]:
     """Replay the engine's SSE event stream (last 100 replayed on connect) as
     parsed JSON payloads. The web layer frames each payload as one SSE event via
@@ -279,15 +348,10 @@ class EngineSupervisor:
         """Best-effort ``active``/``switching`` from ``/engine/status``
         (liveness-only, always 200 while the process is up). A failure here
         never affects liveness/readiness — ``/engine/ready`` already decided
-        that — it just leaves ``active``/``switching`` unknown for this tick."""
-        resp = _get(self._settings, "/engine/status", timeout=2.0)
-        if resp is None:
-            return None, None
-        try:
-            body = resp.json()
-        except ValueError:
-            return None, None
-        return body.get("active"), body.get("switching")
+        that — it just leaves ``active``/``switching`` unknown for this tick.
+        Delegates to the module-level :func:`read_status_meta` (CLAUDE.md:
+        one implementation, shared with the phase coordinator)."""
+        return read_status_meta(self._settings)
 
     @staticmethod
     def _state_for_probe(probe: dict) -> tuple[str, dict]:

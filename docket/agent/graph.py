@@ -11,6 +11,18 @@ Flow per hop:
   retrieve → format numbered context → grounded chat (logprobs on) →
   reliability_label(logprobs). If the answer looks low-confidence and hops
   remain, ask the model for better search terms and re-query (multi-hop recall).
+
+Phase ordering (residency contract D5/D6, docket/phase.py): every
+provider.chat() call enters the engine's CHAT phase and every retriever call
+(collection search + rerank) enters RETRIEVAL -- wrapped once, per call, in
+``providers/router.py``. Each hop already retrieves BEFORE it calls chat (the
+order above), so a plain QA ask is one switch (retrieval -> chat); the
+aggregate path retrieves its whole candidate pool before its one chat/extract
+call, likewise one switch. A re-query hop switches back to retrieval for
+``iterative_retrieve`` and back to chat for the next hop's answer -- genuinely
+needs the LLM's refined query first, so that alternation is inherent, not a
+bug. Preserve this retrieve-then-chat order in any future edit here: it is
+what keeps phase switches minimal, not a separate mechanism.
 """
 
 from __future__ import annotations

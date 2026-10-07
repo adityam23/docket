@@ -122,8 +122,8 @@ Answer accuracy:
 
 | Generator | Oracle evidence | Full RAG @6 | Full RAG @10 (shipped) |
 |---|---|---|---|
-| Qwen3.5-4B Opus-distill | 80.7% | 68.0% | **82.0%** |
-| gemma4:e2b (default chat model) | 55.3% | 40.0% | — |
+| Qwen3.5-4B Opus-distill (default chat model) | 80.7% | 68.0% | **82.0%** |
+| gemma4:e2b | 55.3% | 40.0% | — |
 
 Retrieval recall@6 / recall@10 at threshold 0.5 (36,920 chunks):
 
