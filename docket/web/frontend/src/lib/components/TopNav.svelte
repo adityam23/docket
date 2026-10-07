@@ -31,12 +31,15 @@
 	let ingesting = $derived($ingest.running === true);
 
 	let view = $derived($supervision.view);
-	let tone = $derived(supervisionTone(view?.state));
-	let statusText = $derived(supervisionText(view));
+	// A failed poll means the docket server itself isn't answering: never keep
+	// showing the last engine state as if it were current.
+	let unreachable = $derived(!!$supervision.error);
+	let tone = $derived(unreachable ? 'down' : supervisionTone(view?.state));
+	let statusText = $derived(unreachable ? 'docket server unreachable' : supervisionText(view));
 	// The ONLY two exits a manual restart can take (backend facts, F3): the
 	// terminal `failed` state, and the port-held variant of `offline` (its
 	// `reason` is always set — a bare unconfigured/unprobed offline is not).
-	let canRestart = $derived(view?.state === 'failed' || (view?.state === 'offline' && !!view?.reason));
+	let canRestart = $derived(!unreachable && (view?.state === 'failed' || (view?.state === 'offline' && !!view?.reason)));
 	let restarting = $state(false);
 	let restartError = $state('');
 

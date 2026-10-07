@@ -120,10 +120,7 @@ class Settings(BaseSettings):
     retrieval_mode: Literal["dense", "keyword", "hybrid"] = "hybrid"  # engine modes
     engine_collection: str = Field("docket", pattern=_COLLECTION_NAME_PATTERN)
     #   mettle collection docket ingests into
-    retrieval_k: int = Field(40, ge=1)    # candidates pulled before rerank — the
-    #   retriever still hard-codes 40 today regardless of this field (a separate
-    #   ticket wires it through); this default now matches that hard-coded value
-    #   so the knob is at least honest until it is live.
+    retrieval_k: int = Field(40, ge=1)    # candidates pulled before rerank
     context_chunks: int = Field(10, ge=1)  # top chunks fed to the model
     #   (FinanceBench: 82.0% @10 vs 68.0% @6)
     max_hops: int = Field(2, ge=1)        # iterative agentic re-query budget
