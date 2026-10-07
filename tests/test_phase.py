@@ -422,3 +422,28 @@ def test_switch_io_runs_without_holding_the_lock():
     t.join(timeout=5.0)
 
     assert got_lock, "the lock was held across the switch's I/O call"
+
+
+def test_unknown_active_profile_switches_instead_of_reprobing_forever():
+    """A probe that can't tell the active profile must lead to one switch
+    attempt (which fails loudly if the engine is down), never a re-probe loop."""
+    from docket.config import Settings
+    from docket.phase import Phase, PhaseCoordinator
+
+    probes, switches = [], []
+
+    def status_fn(settings):
+        probes.append(1)
+        return None, None
+
+    def switch_fn(settings, target):
+        switches.append(target)
+        raise RuntimeError("engine down")
+
+    coord = PhaseCoordinator(Settings(), switch_fn=switch_fn, status_fn=status_fn)
+    import pytest
+    with pytest.raises(RuntimeError, match="engine down"):
+        with coord.enter(Phase.CHAT):
+            pass
+    assert probes == [1]
+    assert switches == ["chat"]

@@ -236,7 +236,11 @@ class PhaseCoordinator:
                     except Exception:  # noqa: BLE001 - a probe failure is "unknown", not fatal
                         active = None
                     with self._cond:
-                        self._current = active
+                        # Unknown (probe failed / no `active`) must NOT go back
+                        # to None: that would re-probe in a hot loop against a
+                        # down engine. "" matches no profile, so the next pass
+                        # switches -- which fails loudly if the engine is down.
+                        self._current = active or ""
                         self._switching = False
                         self._cond.notify_all()
                     continue
