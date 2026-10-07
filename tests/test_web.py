@@ -3,6 +3,9 @@ the logprobs extraction that feeds the Tier-1 trust label."""
 
 from __future__ import annotations
 
+import os
+
+import pytest
 from fastapi.testclient import TestClient
 
 from docket.agent.graph import Answer
@@ -108,7 +111,6 @@ def test_ingest_rejects_bad_folder():
 
 
 def test_remove_document_endpoint(monkeypatch):
-    monkeypatch.setattr(webapp.JOBS, "is_running", lambda: False)
     monkeypatch.setattr(webapp, "remove_document", lambda doc_id: 4)
     client = _client()
 
@@ -118,17 +120,45 @@ def test_remove_document_endpoint(monkeypatch):
     monkeypatch.setattr(webapp, "remove_document", lambda doc_id: 0)
     assert client.delete("/api/corpus/nope").status_code == 404  # unknown id
 
-    monkeypatch.setattr(webapp.JOBS, "is_running", lambda: True)
-    assert client.delete("/api/corpus/d1").status_code == 409  # busy ingesting
+    # Busy: another corpus-mutating operation (an ingest job, in practice)
+    # already holds the shared lock -- B4's `_require_idle` rejects instead
+    # of racing Corpus.load/save against it.
+    assert webapp._pipeline.CORPUS_LOCK.acquire(blocking=False)
+    try:
+        assert client.delete("/api/corpus/d1").status_code == 409
+    finally:
+        webapp._pipeline.CORPUS_LOCK.release()
+
+
+def test_remove_document_endpoint_runtime_error_is_409(monkeypatch):
+    # service.remove_document raises RuntimeError when the engine is out of
+    # sync with our lineage -- B4 item 8: a friendly 409, not a bare 500.
+    def boom(doc_id):
+        raise RuntimeError(f"engine does not hold 1 of 2 chunk(s) for document {doc_id!r}")
+
+    monkeypatch.setattr(webapp, "remove_document", boom)
+    client = _client()
+    r = client.delete("/api/corpus/d1")
+    assert r.status_code == 409 and "does not hold" in r.json()["detail"]
 
 
 def test_samples_endpoint(monkeypatch):
-    monkeypatch.setattr(webapp.JOBS, "is_running", lambda: False)
     monkeypatch.setattr(webapp, "load_samples", lambda: None)
     monkeypatch.setattr(webapp, "corpus_stats", lambda: {"totals": {"documents": 2, "chunks": 5}})
     client = _client()
     r = client.post("/api/samples/load")
     assert r.status_code == 200 and r.json()["totals"]["documents"] == 2
+
+
+def test_samples_endpoint_busy_while_corpus_locked(monkeypatch):
+    monkeypatch.setattr(webapp, "load_samples", lambda: None)
+    client = _client()
+    assert webapp._pipeline.CORPUS_LOCK.acquire(blocking=False)
+    try:
+        r = client.post("/api/samples/load")
+        assert r.status_code == 409
+    finally:
+        webapp._pipeline.CORPUS_LOCK.release()
 
 
 def test_capacity_endpoint(monkeypatch):
@@ -180,6 +210,31 @@ def test_upload_rejects_oversize_file(monkeypatch):
     payload = {"files": [{"name": "big.pdf", "content_b64": base64.b64encode(b"x" * 11).decode()}]}
     r = client.post("/api/ingest/upload", json=payload)
     assert r.status_code == 413 and "big.pdf" in r.json()["detail"]
+
+
+def test_upload_rejects_oversized_content_length_header(monkeypatch):
+    # B4 item 7b: a huge DECLARED Content-Length is rejected before the body
+    # is read/base64-decoded at all, using a generous bound over the raw cap.
+    monkeypatch.setattr(webapp.JOBS, "start_uploads", lambda files, settings=None: None)
+    client = _client()
+    huge = str(webapp._MAX_UPLOAD_BYTES * 3)
+    r = client.post(
+        "/api/ingest/upload",
+        json={"files": []},
+        headers={"content-length": huge},
+    )
+    assert r.status_code == 413
+
+
+def test_upload_small_content_length_passes_the_precheck(monkeypatch):
+    class FakeJob:
+        def as_dict(self):
+            return {"id": "job-1", "status": "running", "total": 0, "completed": 0, "docs": []}
+
+    monkeypatch.setattr(webapp.JOBS, "start_uploads", lambda files, settings=None: FakeJob())
+    client = _client()
+    r = client.post("/api/ingest/upload", json={"files": []})
+    assert r.status_code == 200  # declared length is small -> precheck passes
 
 
 def test_config_patch_endpoint(monkeypatch):
@@ -477,3 +532,122 @@ def test_chat_create_endpoint(monkeypatch):
     r = client.post("/api/chats", json={"title": None})
     assert r.status_code == 200 and r.json()["id"] == "chat-new-1" and r.json()["turns"] == []
     assert r.json()["title"] == ""  # untitled until the first turn names it
+
+
+# --- B4: ingest job registry atomicity ---------------------------------------
+
+
+def test_next_seq_is_unique_under_concurrency():
+    # The tentative-seq bug: two concurrent allocations must never return the
+    # same number (which used to let two uploads share -- and rmtree-race --
+    # one directory).
+    import threading
+
+    from docket.web.jobs import IngestJobs
+
+    jobs = IngestJobs()
+    results: list[int] = []
+    out_lock = threading.Lock()
+
+    def worker():
+        n = jobs._next_seq()
+        with out_lock:
+            results.append(n)
+
+    threads = [threading.Thread(target=worker) for _ in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert sorted(results) == list(range(1, 21))  # every number unique, none skipped/duplicated
+
+
+def test_upload_dedupes_same_basename(tmp_path):
+    # B4 item 7a: two picked files sharing a basename must not overwrite each
+    # other in the shared upload dir.
+    import shutil
+
+    from docket.web.jobs import IngestJobs
+
+    jobs = IngestJobs()
+    captured = {}
+
+    def fake_launch(folder, pdfs, *, settings=None, source_of=None, cleanup_dir=None, job_id=None):
+        captured["pdfs"] = pdfs
+        captured["cleanup_dir"] = cleanup_dir
+
+        class _Job:
+            def as_dict(self):
+                return {"id": job_id, "status": "running", "total": 0, "completed": 0, "docs": []}
+
+        return _Job()
+
+    jobs._launch = fake_launch
+    jobs.start_uploads([("report.pdf", b"AAAA"), ("report.pdf", b"BBBB")])
+
+    paths = captured["pdfs"]
+    names = [os.path.basename(p) for p in paths]
+    assert len(names) == 2 and names[0] != names[1]
+    contents = {open(p, "rb").read() for p in paths}
+    assert contents == {b"AAAA", b"BBBB"}  # neither file clobbered the other
+    shutil.rmtree(captured["cleanup_dir"], ignore_errors=True)
+
+
+def test_sweep_stale_uploads_removes_leftover_dirs(tmp_path):
+    from docket.config import Settings
+    from docket.web.jobs import sweep_stale_uploads
+
+    s = Settings(index_dir=str(tmp_path))
+    stale = os.path.join(s.index_dir, ".uploads", "job-3")
+    os.makedirs(stale, exist_ok=True)
+    with open(os.path.join(stale, "leftover.pdf"), "wb") as f:
+        f.write(b"x")
+
+    sweep_stale_uploads(settings=s)
+    assert not os.path.exists(os.path.join(s.index_dir, ".uploads"))
+
+
+def test_launch_rejects_while_corpus_lock_held():
+    # The _launch-time pre-check used to run BEFORE claiming anything, so two
+    # concurrent launches could both see "idle". Now it's one atomic
+    # acquire-or-reject on the same lock every corpus mutation shares.
+    import docket.ingest.pipeline as pipeline
+    from docket.web.jobs import IngestJobs
+
+    jobs = IngestJobs()
+    assert pipeline.CORPUS_LOCK.acquire(blocking=False)
+    try:
+        with pytest.raises(RuntimeError, match="already running"):
+            jobs._launch("some folder", ["/x/a.pdf"])
+    finally:
+        pipeline.CORPUS_LOCK.release()
+    assert not jobs.is_running()  # nothing was actually started
+
+
+def test_launch_releases_corpus_lock_after_job_completes(monkeypatch, tmp_path):
+    # The lock is acquired in _launch and must be released by _run once the
+    # worker thread finishes, whether it succeeds or raises.
+    import docket.ingest.pipeline as pipeline
+    from docket.config import Settings
+    from docket.web.jobs import IngestJobs
+
+    from .fakes import FakeEngine
+
+    jobs = IngestJobs()
+    monkeypatch.setattr(pipeline, "get_provider", lambda s: FakeEngine())
+    monkeypatch.setattr(pipeline, "pdf_to_pages", lambda path: [{"page": 1, "text": "hello world"}])
+
+    job = jobs._launch("f", ["/x/doc.pdf"], settings=Settings(index_dir=str(tmp_path)))
+    jobs._worker.join(timeout=5)
+    assert not jobs._worker.is_alive()
+
+    # Released by _run's finally -> re-acquirable. Guard the release so a
+    # failed assertion here can never leave this process-wide lock stuck held
+    # for every other test in the session.
+    reacquired = pipeline.CORPUS_LOCK.acquire(blocking=False)
+    try:
+        assert reacquired
+    finally:
+        if reacquired:
+            pipeline.CORPUS_LOCK.release()
+    assert jobs.latest()["id"] == job.id

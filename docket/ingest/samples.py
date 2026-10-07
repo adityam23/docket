@@ -7,9 +7,12 @@ few *synthetic* documents so a new user can try retrieval/QA without exposing an
 real data. Sample doc ids are prefixed ``sample-`` so they are easy to spot and
 remove via the normal document controls.
 
-Reuses the shared chunk → engine-post → lineage tail (CLAUDE.md: one ingest
-path); only the PDF/OCR front is skipped because the content ships as plain
-text."""
+Reuses the shared chunk → POST → persist tail (``pipeline._ingest_doc``,
+CLAUDE.md: one ingest path); only the PDF/OCR front is skipped because the
+content ships as plain text. Doc-level dedup mirrors ``ingest_paths``: a
+sample doc_id already in the corpus is skipped without re-POSTing its chunks —
+previously every "Load samples" click re-POSTed every chunk, 409ing against
+the engine on the second click."""
 
 from __future__ import annotations
 
@@ -18,11 +21,8 @@ from importlib import resources
 from typing import Optional
 
 from ..config import Settings, load_settings
-from .chunk import Chunk, chunk_pages
 from .index import Corpus
-from .pipeline import StageEvent, _post_chunks
-
-SAMPLE_PREFIX = "sample-"
+from .pipeline import StageEvent, _emitter, _ingest_doc, _ready_provider
 
 
 def _sample_docs() -> list[dict]:
@@ -40,36 +40,32 @@ def load_samples(
     corpus: Corpus | None = None,
     on_event: Optional[StageEvent] = None,
 ) -> Corpus:
-    """Add the bundled synthetic sample documents to the corpus and persist.
+    """Add the bundled synthetic sample documents to the corpus.
 
-    Idempotent: ``Corpus.add`` skips chunks already present by id, so re-loading
-    the samples is a no-op. Chunks are POSTed to the engine like every other
-    document (engine unreachable → loud failure, like every engine feature)."""
+    Idempotent: a sample doc_id already in the corpus is skipped outright (no
+    re-chunk, no re-POST), so re-loading the samples is a no-op — like
+    ``ingest_paths``'s doc-level dedup. Chunks are POSTed to the engine like
+    every other document (engine unreachable → loud failure, like every
+    engine feature)."""
     s = settings or load_settings()
     c = corpus if corpus is not None else Corpus.load(s.index_dir)
-
-    def emit(doc_id: str, stage: str, **info: object) -> None:
-        if on_event is not None:
-            on_event(doc_id, stage, dict(info))
+    seen: set[str] = set(c.doc_ids())
+    emit = _emitter(on_event)
+    provider = _ready_provider(s)  # one provider + one ensure_collection per run
 
     for doc in _sample_docs():
         doc_id = doc["doc_id"]
-        source = f"sample://{doc.get('title', doc_id)}"
-        emit(doc_id, "chunk", pages=len(doc["pages"]))
-        chunks: list[Chunk] = chunk_pages(
-            doc["pages"],
-            doc_id=doc_id,
-            source=source,
-            words=s.chunk_words,
-            overlap=s.chunk_overlap,
-        )
-        if not chunks:
-            emit(doc_id, "skipped", reason="empty sample")
+        if doc_id in seen:
+            emit(doc_id, "skipped", reason="already indexed")
             continue
-        emit(doc_id, "post", chunks=len(chunks))
-        _post_chunks(chunks, settings=s)
-        c.add(chunks)
-        emit(doc_id, "done", chunks=len(chunks))
+        source = f"sample://{doc.get('title', doc_id)}"
+        outcome = _ingest_doc(
+            doc_id, doc["pages"],
+            source=source, meta={}, corpus=c,
+            provider=provider, collection=s.engine_collection, settings=s,
+            emit=emit, empty_reason="empty sample",
+        )
+        if outcome == "done":
+            seen.add(doc_id)
 
-    c.save(s.index_dir)
     return c

@@ -17,10 +17,11 @@ import json
 import os
 import queue
 import threading
+from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -41,6 +42,7 @@ from ..config_write import (
     set_secret,
     update_config,
 )
+from ..ingest import pipeline as _pipeline
 from ..ingest.index import Corpus
 from ..ingest.samples import load_samples
 from ..report.render import reliability_banner
@@ -48,7 +50,7 @@ from ..service import ask_traced as ask_traced_service
 from ..service import chat_store, health as health_service
 from ..service import remove_document
 from ..service import trace_store
-from .jobs import JOBS
+from .jobs import JOBS, sweep_stale_uploads
 from .observability import capacity_stats, config_view, corpus_stats
 
 # Cap browser-uploaded ingests so a stray selection can't exhaust memory/disk.
@@ -126,7 +128,12 @@ app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost
 def _start_engine_supervisor() -> None:
     """§3: on startup, probe the engine and spawn mettled when configured and
     unreachable. The supervisor then keeps it alive (crash-restart, bounded
-    backoff) for the process's lifetime."""
+    backoff) for the process's lifetime.
+
+    Also sweeps any ``.uploads/job-N`` temp dirs a previous process left
+    behind by dying mid-ingest (B4) — safe every time, since this process's
+    own ingest-job registry always starts empty."""
+    sweep_stale_uploads()
     get_supervisor(load_settings()).ensure()
 
 
@@ -245,12 +252,36 @@ def api_capacity() -> dict:
     return capacity_stats()
 
 
+@contextmanager
+def _require_idle():
+    """Guard a corpus-mutating endpoint (samples load, document removal)
+    against racing an ingest job OR another such endpoint: both share
+    ``pipeline.CORPUS_LOCK`` with the job runner (B4), so at most one writer
+    ever touches ``Corpus.load``/``save`` at a time. Busy -> 409 immediately,
+    rather than silently queuing behind what might be a long-running ingest.
+    Replaces the duplicated ``JOBS.is_running()`` pre-checks that used to live
+    in each endpoint below (which raced against a job starting in between the
+    check and the mutation)."""
+    if not _pipeline.CORPUS_LOCK.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="an ingest job is running; try again once it finishes")
+    try:
+        yield
+    finally:
+        _pipeline.CORPUS_LOCK.release()
+
+
 @app.delete("/api/corpus/{doc_id}")
 def api_remove_document(doc_id: str) -> dict:
-    """Remove one document (all its chunks + vectors) from the local index."""
-    if JOBS.is_running():
-        raise HTTPException(status_code=409, detail="an ingest job is running; try again once it finishes")
-    removed = remove_document(doc_id)
+    """Remove one document: its chunks from the engine's collection, plus its
+    lineage rows from the local index."""
+    with _require_idle():
+        try:
+            removed = remove_document(doc_id)
+        except RuntimeError as e:
+            # The engine is out of sync with our lineage (some chunks already
+            # gone engine-side) — surface it as a retryable conflict, not a
+            # bare 500/traceback.
+            raise HTTPException(status_code=409, detail=str(e)) from e
     if not removed:
         raise HTTPException(status_code=404, detail=f"no such document: {doc_id}")
     return {"doc_id": doc_id, "removed_chunks": removed}
@@ -259,9 +290,8 @@ def api_remove_document(doc_id: str) -> dict:
 @app.post("/api/samples/load")
 def api_load_samples() -> dict:
     """Opt-in: add the bundled synthetic sample documents to the index."""
-    if JOBS.is_running():
-        raise HTTPException(status_code=409, detail="an ingest job is running; try again once it finishes")
-    load_samples()
+    with _require_idle():
+        load_samples()
     return corpus_stats()
 
 
@@ -484,19 +514,48 @@ def api_engine_events() -> StreamingResponse:
     return StreamingResponse(engine_events_stream(load_settings()), media_type="text/event-stream")
 
 
+def _start_job(start, *args) -> dict:
+    """Launch an ingest job: bad input is 400, a job already running is 409
+    (the same "busy" status ``_require_idle`` uses)."""
+    try:
+        return start(*args).as_dict()
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+
+
 @app.post("/api/ingest")
 def api_ingest(req: IngestRequest) -> dict:
     """Kick off a background ingest of every PDF under ``folder`` and return the
     initial job state (poll ``/api/ingest/status`` for live per-document stages)."""
+    return _start_job(JOBS.start, req.folder)
+
+
+def _check_upload_content_length(request: Request) -> None:
+    """Reject an oversized upload by its declared ``Content-Length`` BEFORE the
+    JSON body is read and base64-decoded — a resolved dependency runs before
+    FastAPI awaits the body, so this rejects a huge payload before any of it is
+    buffered. Base64 inflates raw bytes by ~4/3 and the JSON envelope (field
+    names, one object per file) adds a little more, so the bound here is
+    deliberately generous over the raw cap; the per-file/per-total checks below
+    (against the DECODED bytes) remain the authoritative limits."""
+    declared = request.headers.get("content-length")
+    if declared is None:
+        return
     try:
-        job = JOBS.start(req.folder)
-    except (ValueError, RuntimeError) as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-    return job.as_dict()
+        length = int(declared)
+    except ValueError:
+        return
+    bound = int(_MAX_UPLOAD_BYTES * 4 / 3) + 1024 * 1024  # base64 + JSON slack
+    if length > bound:
+        raise HTTPException(status_code=413, detail="selection exceeds the upload size limit")
 
 
 @app.post("/api/ingest/upload")
-def api_ingest_upload(req: UploadRequest) -> dict:
+def api_ingest_upload(
+    req: UploadRequest, _content_length_ok: None = Depends(_check_upload_content_length)
+) -> dict:
     """Ingest PDFs the user picked with the in-browser folder chooser.
 
     The browser reads files locally and sends them base64-encoded (no server-side
@@ -519,11 +578,7 @@ def api_ingest_upload(req: UploadRequest) -> dict:
         if total > _MAX_UPLOAD_BYTES:
             raise HTTPException(status_code=413, detail="selection exceeds the upload size limit")
         decoded.append((item.name, data))
-    try:
-        job = JOBS.start_uploads(decoded)
-    except (ValueError, RuntimeError) as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-    return job.as_dict()
+    return _start_job(JOBS.start_uploads, decoded)
 
 
 @app.get("/api/ingest/status")

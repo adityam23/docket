@@ -57,13 +57,28 @@ def serve(host: str = "127.0.0.1", port: int = 8760, reload: bool = True) -> Non
 
 @app.command()
 def ingest(folder: str) -> None:
-    """Ingest every PDF under FOLDER: OCR→chunk→post to the engine collection."""
+    """Ingest every PDF under FOLDER: OCR→chunk→post to the engine collection.
+
+    A document whose POST fails (e.g. the engine's model slot dropped
+    mid-batch) is skipped with its reason printed — the rest of the folder
+    still ingests; rerun the command to retry just the failed document(s)
+    (contract D3)."""
     from .ingest.pipeline import ingest_folder
 
     s = load_settings()
-    corpus = ingest_folder(folder, settings=s)
+    failed: list[tuple[str, str]] = []
+
+    def on_event(doc_id: str, stage: str, info: dict) -> None:
+        if stage == "failed":
+            failed.append((doc_id, str(info.get("reason", ""))))
+
+    corpus = ingest_folder(folder, settings=s, on_event=on_event)
     typer.echo(f"indexed {len(corpus)} chunks → {s.index_dir} "
                f"(lineage rows → {s.index_dir}; chunks live engine-side)")
+    if failed:
+        typer.echo(f"\n{len(failed)} document(s) failed and were skipped (retryable):", err=True)
+        for doc_id, reason in failed:
+            typer.echo(f"  - {doc_id}: {reason}", err=True)
 
 
 @app.command()
@@ -95,7 +110,13 @@ def remove(doc_id: str) -> None:
     from .service import remove_document
 
     s = load_settings()
-    removed = remove_document(doc_id, settings=s)
+    try:
+        removed = remove_document(doc_id, settings=s)
+    except RuntimeError as e:
+        # The engine is out of sync with our lineage -- a clean one-line error,
+        # not an uncaught traceback (lineage is left in place for a retry).
+        typer.echo(str(e), err=True)
+        raise typer.Exit(code=1)
     if removed:
         typer.echo(f"removed {doc_id} ({removed} chunks)")
     else:

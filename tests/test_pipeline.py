@@ -549,6 +549,109 @@ def test_ingest_posts_filing_metadata_to_engine(monkeypatch, tmp_path):
     assert meta["page"] == "1" and meta["fiscal_period"] == "2018"
 
 
+def test_ingest_paths_builds_provider_once_per_run(monkeypatch, tmp_path):
+    # B4 item 4: a prior version called get_provider() + ensure_collection()
+    # once PER DOCUMENT (a fresh httpx client + an extra POST each) -- must
+    # happen exactly once for the whole run, regardless of document count.
+    import docket.ingest.pipeline as pipe
+
+    stub = FakeEngine()
+    calls = {"get_provider": 0}
+
+    def fake_get_provider(s):
+        calls["get_provider"] += 1
+        return stub
+
+    monkeypatch.setattr(pipe, "get_provider", fake_get_provider)
+    monkeypatch.setattr(
+        pipe, "pdf_to_pages", lambda path: [{"page": 1, "text": "alpha beta gamma"}],
+    )
+    s = Settings(index_dir=str(tmp_path))
+    pipe.ingest_paths(["/x/a.pdf", "/x/b.pdf", "/x/c.pdf"], settings=s, corpus=Corpus())
+    assert calls["get_provider"] == 1
+    assert stub.ensure_collection_calls == 1
+
+
+def test_ingest_paths_between_documents_seam_fires_once_per_document(monkeypatch, tmp_path):
+    # B4 follow-up seam: exactly one call point between documents (done,
+    # skipped, OR failed), so a future ticket can hook a pause there.
+    import docket.ingest.pipeline as pipe
+
+    monkeypatch.setattr(pipe, "get_provider", lambda s: FakeEngine())
+    monkeypatch.setattr(
+        pipe, "pdf_to_pages", lambda path: [{"page": 1, "text": "alpha beta gamma"}],
+    )
+    s = Settings(index_dir=str(tmp_path))
+    ticks = []
+    pipe.ingest_paths(
+        ["/x/a.pdf", "/x/b.pdf"], settings=s, corpus=Corpus(),
+        between_documents=lambda: ticks.append(True),
+    )
+    assert len(ticks) == 2  # once per document, including the default no-op path
+
+    # Default (no hook given) must not raise -- the no-op is the default.
+    pipe.ingest_paths(["/x/a.pdf"], settings=s, corpus=Corpus())
+
+
+def test_ingest_doc_failure_persists_earlier_lineage_rolls_back_and_continues(monkeypatch, tmp_path):
+    # Contract D3: a document whose POST fails mid-way is recorded "failed"
+    # with NO lineage written, its already-posted chunks are best-effort
+    # DELETEd (so a retry doesn't 409), and the batch continues -- an EARLIER
+    # successful document's lineage must already be on disk, not just held in
+    # memory until some final batch-wide save.
+    import docket.ingest.pipeline as pipe
+
+    pages_by_doc = {
+        "a": [{"page": 1, "text": "alpha"}],                  # 1 chunk -> posts fine
+        "b": [{"page": 1, "text": "bravo charlie delta"}],     # 3 chunks @ words=1
+        "c": [{"page": 1, "text": "echo"}],                    # 1 chunk -> posts fine
+    }
+    monkeypatch.setattr(
+        pipe, "pdf_to_pages",
+        lambda path: pages_by_doc[pipe.doc_id_of(path)],
+    )
+    # Calls in order: a#0 (1,ok) b#0 (2,ok) b#1 (3,FAILS) -- b#2 never attempted.
+    engine = FakeEngine(fail_post_at=3)
+    monkeypatch.setattr(pipe, "get_provider", lambda s: engine)
+
+    s = Settings(index_dir=str(tmp_path), chunk_words=1, chunk_overlap=0)
+    events = []
+    corpus = pipe.ingest_into_index(
+        ["/x/a.pdf", "/x/b.pdf", "/x/c.pdf"], settings=s,
+        on_event=lambda d, st, i: events.append((d, st)),
+    )
+
+    assert ("b", "failed") in events
+    assert ("a", "done") in events and ("c", "done") in events
+    assert set(corpus.doc_ids()) == {"a", "c"}            # b never got lineage
+
+    # Persisted to disk DURING the run, not just reconstructable in memory.
+    persisted = Corpus.load(s.index_dir)
+    assert set(persisted.doc_ids()) == {"a", "c"}
+
+    # b's one already-posted chunk was best-effort cleaned up engine-side.
+    assert ("docket", "b#0") in engine.deleted
+    assert "b#1" not in [cid for _, cid in engine.deleted]  # the failing chunk itself was never written
+
+
+def test_load_samples_skips_already_indexed_and_does_not_repost(tmp_path, monkeypatch):
+    # B4 item 3: loading samples twice used to re-POST every chunk every time,
+    # 409ing against the engine on the second "Load samples" click.
+    import docket.ingest.pipeline as pipe
+    from docket.ingest.samples import load_samples
+
+    engine = FakeEngine()
+    monkeypatch.setattr(pipe, "get_provider", lambda s: engine)
+    s = Settings(index_dir=str(tmp_path))
+
+    load_samples(settings=s)
+    first_count = len(engine.posted)
+    assert first_count > 0
+
+    load_samples(settings=s)  # second click
+    assert len(engine.posted) == first_count  # nothing re-POSTed
+
+
 def test_capacity_reports_disk_bound(tmp_path):
     # The local store is lineage-only; capacity is disk-bound (engine-side
     # storage owns text and vectors).

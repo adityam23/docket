@@ -8,7 +8,10 @@ chunk unranked for tests where a reranker does the ordering).
 ``collection_search`` treats an EMPTY allowlist as "no allowlist" (mirrors the
 real provider's ``if allowlist:`` in ``openai_compat.py`` — a separate ticket
 stops an empty scope reaching the provider at all). ``delete_document`` is
-False for an id it never held (mirrors the real 404 -> False)."""
+False for an id it never held (mirrors the real 404 -> False). ``fail_post_at``
+(B4) makes the Nth ``post_document`` call across the fake's whole lifetime
+raise, to exercise per-document ingest failure/rollback without a bespoke
+local fake per test file."""
 
 from __future__ import annotations
 
@@ -56,6 +59,8 @@ class FakeEngine:
         text: str = "Revenue was $10M [1].",
         logprobs: list[float] | None = None,
         rerank_fn: Callable[[str, list[str]], list[float]] | None = None,
+        fail_post_at: int | None = None,
+        fail_post_exc: Exception | None = None,
     ) -> None:
         if rank not in ("overlap", "all"):
             raise ValueError(f"unknown rank mode: {rank!r}")
@@ -67,6 +72,13 @@ class FakeEngine:
         self.posted: list[tuple[str, str, dict]] = []  # (collection, doc_id, metadata)
         self.deleted: list[tuple[str, str]] = []        # (collection, doc_id)
         self.last_allowlist: list[str] | None = None
+        # 1-based count of post_document calls across this fake's lifetime; the
+        # call AT this count raises instead of succeeding (B4 ingest-failure
+        # tests). None (default) never fails.
+        self._fail_post_at = fail_post_at
+        self._fail_post_exc = fail_post_exc
+        self._post_calls = 0
+        self.ensure_collection_calls = 0
 
     def health(self) -> dict:
         return {"models": ["fake"]}
@@ -75,9 +87,12 @@ class FakeEngine:
         return ChatResult(text=self._text, logprobs=self._logprobs, raw={})
 
     def ensure_collection(self, collection: str) -> None:
-        pass
+        self.ensure_collection_calls += 1
 
     def post_document(self, collection, doc_id, text, metadata=None):
+        self._post_calls += 1
+        if self._fail_post_at is not None and self._post_calls == self._fail_post_at:
+            raise self._fail_post_exc or RuntimeError("simulated post_document failure")
         self.posted.append((collection, doc_id, metadata or {}))
         self._docs[doc_id] = text
         return [f"{doc_id}/chunk/0"]
