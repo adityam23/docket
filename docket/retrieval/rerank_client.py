@@ -5,15 +5,15 @@ contract); an engine without it fails loudly, like every engine feature."""
 
 from __future__ import annotations
 
-from ..config import Settings, load_settings
-from ..providers.router import get_provider
+from ..providers.base import Provider
 
 
-def make_reranker(settings: Settings | None = None):
+def make_reranker(provider: Provider):
     """Build the ``Reranker`` callable ``(query, docs) -> scores`` for the seam.
 
     One score per document, in the input order, higher = more relevant (the
-    provider scatters the endpoint's sorted results back to request order)."""
-    s = settings or load_settings()
-    provider = get_provider(s)
+    provider scatters the endpoint's sorted results back to request order).
+    Takes the ALREADY-BUILT provider rather than ``Settings`` — one provider
+    per retriever (``load_retriever`` previously resolved it twice: once here,
+    once for the retriever itself)."""
     return lambda query, docs: provider.rerank(query, docs)

@@ -10,6 +10,11 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 
+# The one definition of "what filing identity fields exist" (T22/B3 — CLAUDE.md
+# reusability): Lineage, the retriever's hit dict, and trace.hit_view all build
+# their filing-identity slice off this tuple instead of repeating the field list.
+FILING_FIELDS = ("form_type", "company", "ticker", "fiscal_period")
+
 
 @dataclass(frozen=True)
 class Chunk:

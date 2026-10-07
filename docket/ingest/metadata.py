@@ -8,6 +8,7 @@ bare ``doc_id`` (never invent identity).
 
 from __future__ import annotations
 
+import os
 import re
 
 # Canonical form -> substrings (lowercased) that identify it. Order matters:
@@ -20,7 +21,17 @@ _FORM_ALIASES = [
     ("ARS", ["ars"]),
 ]
 
-_YEAR = re.compile(r"(?:19|20)\d{2}")
+# A standalone 4-digit year (19xx/20xx) — NOT embedded in a longer digit run
+# (a CIK, an accession number, ...). The lookaround asserts no digit directly
+# before/after the match, so "0000320193" never yields "2019".
+_YEAR = re.compile(r"(?<!\d)(?:19|20)\d{2}(?!\d)")
+
+
+def _alias_pattern(alias: str) -> re.Pattern:
+    """Whole-word match for a form alias: no identifier character (letter,
+    digit, or space — aliases like "def 14a" are themselves multi-word)
+    directly before/after it, so e.g. "ars" doesn't match inside "lars"."""
+    return re.compile(rf"(?<![a-z0-9]){re.escape(alias)}(?![a-z0-9])")
 
 
 def extract_filing_metadata(doc_id: str, source: str = "") -> dict:
@@ -29,12 +40,17 @@ def extract_filing_metadata(doc_id: str, source: str = "") -> dict:
     Only populates company/ticker when a form type was detected (i.e. the name
     reads like a filing); otherwise everything stays empty so the citation UI
     degrades honestly to ``doc_id``.
+
+    Matches on ``doc_id`` and the source's BASENAME only — never the full
+    path — so an incidental substring in a directory name (e.g. a username
+    "lars" containing "ars") or a digit run in a parent directory can't be
+    mistaken for filing identity (the module's rule: never invent it).
     """
-    name = f"{doc_id} {source}".lower()
+    name = f"{doc_id} {os.path.basename(source)}".lower()
     meta = {"form_type": "", "company": "", "ticker": "", "fiscal_period": ""}
 
     for canon, aliases in _FORM_ALIASES:
-        if any(a in name for a in aliases):
+        if any(_alias_pattern(a).search(name) for a in aliases):
             meta["form_type"] = canon
             break
 

@@ -41,13 +41,15 @@ def load_retriever(
     allowlist), for per-document harnesses like full-RAG FinanceBench."""
     s = settings or load_settings()
     corpus = corpus if corpus is not None else Corpus.load(s.index_dir)
+    provider = get_provider(s)
     return Retriever(
-        get_provider(s),
+        provider,
         corpus,
         collection=s.engine_collection,
         mode=s.retrieval_mode,
-        reranker=make_reranker(s),
+        reranker=make_reranker(provider),
         scope_doc=scope_doc,
+        candidates=s.retrieval_k,
     )
 
 

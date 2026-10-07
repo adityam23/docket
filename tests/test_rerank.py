@@ -100,7 +100,6 @@ def test_engine_serves_rerank_on_the_one_base():
 
 def test_load_retriever_wires_reranker_and_reorders(monkeypatch):
     from docket import service
-    from docket.retrieval import rerank_client
 
     chunks = acme_chunks()
     texts = {ch.chunk_id: ch.text for ch in chunks}
@@ -108,10 +107,9 @@ def test_load_retriever_wires_reranker_and_reorders(monkeypatch):
     # (length descending — a deterministic, non-identity order).
     engine = FakeEngine(chunks, rank="all", rerank_fn=lambda q, docs: [float(len(d)) for d in docs])
 
-    # load_retriever resolves the provider twice (retriever + reranker); stub
-    # both so the test never reaches a live engine.
+    # load_retriever resolves the provider exactly once, reused for both the
+    # retriever and the reranker (one provider per retriever).
     monkeypatch.setattr(service, "get_provider", lambda s: engine)
-    monkeypatch.setattr(rerank_client, "get_provider", lambda s: engine)
     s = Settings(rerank_model="bge-reranker-v2-m3:latest")
     c = Corpus()
     c.add(chunks)

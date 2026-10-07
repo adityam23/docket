@@ -25,6 +25,8 @@ import json
 import os
 from typing import TYPE_CHECKING, Callable, Optional
 
+from ..ingest.chunk import FILING_FIELDS
+
 if TYPE_CHECKING:  # avoid an import cycle at runtime (graph imports this module)
     from .graph import Answer
 
@@ -45,10 +47,7 @@ def hit_view(h: dict) -> dict:
         "chunk_id": h.get("chunk_id"),
         "doc_id": h.get("doc_id"),
         "page": h.get("page"),
-        "form_type": h.get("form_type") or "",
-        "company": h.get("company") or "",
-        "ticker": h.get("ticker") or "",
-        "fiscal_period": h.get("fiscal_period") or "",
+        **{f: h.get(f) or "" for f in FILING_FIELDS},
         "score": h.get("score"),
         "rank": h.get("rank"),
         "text": h.get("text") or "",

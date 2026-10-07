@@ -36,10 +36,16 @@ def _emit(on_step: StepSink | None, kind: str, **info: object) -> None:
     if on_step is not None:
         on_step(kind, dict(info))
 
+# The ONE refusal sentence (CLAUDE.md reusability) — every path that tells the
+# user the documents don't contain an answer says exactly this (the system
+# prompt, the QA fallback, the aggregate "no hits"/"no values" paths), instead
+# of each repeating its own copy of the literal string.
+REFUSAL = "The documents do not contain this."
+
 _SYSTEM = (
     "You are a careful document analyst. Answer ONLY from the numbered context. "
     "Cite every claim with the bracketed source number, e.g. [2]. If the context "
-    "does not contain the answer, say exactly: 'The documents do not contain this.' "
+    f"does not contain the answer, say exactly: '{REFUSAL}' "
     "Do not use outside knowledge."
 )
 
@@ -148,13 +154,12 @@ def _refine_query(provider: Provider, question: str, context: str) -> str:
 def _citations(text: str, hits: list[dict]) -> list[Citation]:
     """Resolve [n] markers in the answer to source hits (cite_page semantics).
 
-    Falls back to the top hit when the model answered without explicit markers,
-    so a grounded answer is never left uncited.
+    No markers means no citations — including the refusal sentence, which
+    never carries a [n] marker. Citing hit 1 anyway would fake grounding for
+    an answer (or a refusal!) the model never actually anchored to that hit.
     """
     used = {int(n) for n in _CITE.findall(text)}
     idxs = sorted(i for i in used if 1 <= i <= len(hits))
-    if not idxs and hits:
-        idxs = [1]
     return [Citation.from_hit(hits[i - 1]) for i in idxs]
 
 
@@ -186,18 +191,56 @@ _OP_TRIGGERS: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 _PERIOD_CUES = ("per month", "per year", "monthly", "each month", "annually")
 
+# An _OP_TRIGGERS keyword alone is ambiguous: "total revenue for Adobe in
+# FY2017" and "how many employees does Adobe have" both contain one, but each
+# names ONE metric for one entity/period — not a roll-up. On FinanceBench this
+# mis-routed ~29% of single-fact questions to the deterministic aggregate path
+# (sum over whatever chunks retrieval happened to pull). Aggregation now also
+# requires one of these explicit multi-item/across-documents signals.
+_CROSS_SCOPE_CUES = (
+    "across", "each of", "every", "combined", "sum of", "add up", "added up",
+    "add them up", "aggregate", "between them",
+)
+# "all <plural collective noun>" — "all reporting segments", "all subsidiaries",
+# "all of the filings".
+_CROSS_SCOPE_GROUP_RE = re.compile(
+    r"\ball\b[^.?!]{0,40}\b(filings?|companies|company|segments?|subsidiar\w*|"
+    r"documents?|years?|quarters?|periods?|reports?)\b"
+)
+# Plural comparisons: naming several items in one question ("X and Y", "X vs
+# Y", "compare X and Y") implies a roll-up/diff across them, not one fact.
+_COMPARISON_RE = re.compile(
+    r"\bcompare\b|\bversus\b|\bvs\.?\b|\bdifference between\b|\bboth\b.+\band\b"
+)
+
+
+def _has_cross_scope_signal(q: str) -> bool:
+    """Whether ``q`` (already lowercased) names more than one item/document to
+    roll up over — see :data:`_CROSS_SCOPE_CUES` for why this gates every
+    ``_OP_TRIGGERS`` match."""
+    if any(cue in q for cue in _CROSS_SCOPE_CUES):
+        return True
+    return bool(_CROSS_SCOPE_GROUP_RE.search(q) or _COMPARISON_RE.search(q))
+
 
 def plan_operation(question: str) -> Operation | None:
     """Classify a question as an aggregation op, or None for plain QA.
 
-    Deterministic and offline-testable. Returns None (→ QA path) for anything
-    that isn't clearly a cross-value roll-up, so single-fact recall is untouched.
+    An ``_OP_TRIGGERS`` keyword ("total", "how many", "average", "highest",
+    ...) is necessary but not sufficient: the question must ALSO carry an
+    explicit multi-item/across-documents signal (:func:`_has_cross_scope_signal`),
+    otherwise it reads as a single metric for one entity/period and goes to
+    plain QA. Deterministic and offline-testable.
     """
     q = question.lower()
+    if not _has_cross_scope_signal(q):
+        return None
     for name, kws in _OP_TRIGGERS:
         if any(kw in q for kw in kws):
             return Operation(name=name, target=question)
-    # "... across ... per month/monthly ..." implies summation even without "total".
+    # "... across ... per month/monthly ..." implies summation even without an
+    # _OP_TRIGGERS keyword (e.g. "total"). "across" already satisfied the
+    # cross-scope gate above.
     if "across" in q and any(c in q for c in _PERIOD_CUES):
         return Operation(name="sum", target=question)
     return None
@@ -357,8 +400,8 @@ def _aggregate_answer(
     hits = retriever.retrieve(question, k=k)
     _emit(on_step, "retrieve", hop=0, query=question, hits=[hit_view(h) for h in hits])
     if not hits:
-        _emit(on_step, "final", text="The documents do not contain this.", reliability="unknown")
-        return Answer(question, "The documents do not contain this.", "unknown", float("nan"))
+        _emit(on_step, "final", text=REFUSAL, reliability="unknown")
+        return Answer(question, REFUSAL, "unknown", float("nan"))
 
     extract_msgs = _extract_messages(op.target, _format_context(hits))
     _emit(on_step, "extract_prompt", hop=0, messages=extract_msgs)
@@ -375,11 +418,7 @@ def _aggregate_answer(
         agg = aggregate(op.name, items)
     except ValueError as e:
         # Refuse to invent a number: no values, or incomparable units.
-        msg = (
-            "The documents do not contain this."
-            if not items
-            else f"Could not compute a single {op.name}: {e}."
-        )
+        msg = REFUSAL if not items else f"Could not compute a single {op.name}: {e}."
         _emit(on_step, "final", text=msg, reliability="low" if items else "unknown")
         return Answer(question, msg, "low" if items else "unknown", surprisal, hits=hits)
 
@@ -438,7 +477,8 @@ def answer(
     _emit(on_step, "retrieve", hop=0, query=question, hits=[hit_view(h) for h in hits])
     res = None
     reliability, surprisal = "unknown", float("nan")
-    for hop in range(max(1, s.max_hops)):
+    max_hops = max(1, s.max_hops)
+    for hop in range(max_hops):
         context = _format_context(hits)
         _emit(on_step, "context", hop=hop, context=context)
         messages = _grounded_messages(question, context, history=bounded_history)
@@ -446,7 +486,7 @@ def answer(
         res = provider.chat(messages, temperature=0.0, max_tokens=700)
         reliability, surprisal = reliability_score(res.logprobs or [])
         _emit(on_step, "response", hop=hop, text=res.text, reliability=reliability)
-        last_hop = hop == max(1, s.max_hops) - 1
+        last_hop = hop == max_hops - 1
         # Re-query only when the label is genuinely low AND we have a signal to
         # trust; without logprobs the label is 'unknown' and re-querying is noise.
         if reliability != "low" or last_hop or not res.logprobs:
@@ -457,7 +497,7 @@ def answer(
         hits = retriever.iterative_retrieve(queries, k=s.context_chunks)
         _emit(on_step, "retrieve", hop=hop + 1, query=nq, hits=[hit_view(h) for h in hits])
 
-    text = res.text if res else "The documents do not contain this."
+    text = res.text if res else REFUSAL
     _emit(on_step, "final", text=text, reliability=reliability)
     return Answer(
         question=question,

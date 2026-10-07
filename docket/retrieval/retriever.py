@@ -14,12 +14,20 @@ Every engine failure is loud — there is no local fallback to degrade to."""
 
 from __future__ import annotations
 
+import logging
 from typing import Callable, Optional, Sequence
 
+from ..ingest.chunk import FILING_FIELDS
 from ..ingest.index import Corpus
+
+log = logging.getLogger(__name__)
 
 # (query, docs) -> one score per document in the input order (higher = better).
 Reranker = Callable[[str, Sequence[str]], list[float]]
+
+# Default candidate pool pulled before rerank, when the caller doesn't wire
+# Settings.retrieval_k through (e.g. a bare Retriever in a test or script).
+DEFAULT_CANDIDATES = 40
 
 
 class Retriever:
@@ -32,6 +40,7 @@ class Retriever:
         mode: str = "hybrid",
         reranker: Optional[Reranker] = None,
         scope_doc: Optional[str] = None,
+        candidates: int = DEFAULT_CANDIDATES,
     ) -> None:
         if mode not in ("dense", "keyword", "hybrid"):
             raise ValueError(f"unknown search mode: {mode!r}")
@@ -43,20 +52,37 @@ class Retriever:
         # Optional per-document scope: restrict engine search to one filing's
         # chunks via the search allowlist (document ids = docket chunk ids).
         self.scope_doc = scope_doc
+        # Candidate pool pulled before rerank — Settings.retrieval_k when wired
+        # through load_retriever, this default otherwise (bare Retriever in
+        # tests/scripts).
+        self.candidates = candidates
 
-    def retrieve(self, query: str, *, k: int = 10, candidates: int = 40) -> list[dict]:
+    def retrieve(self, query: str, *, k: int = 10, candidates: int | None = None) -> list[dict]:
         """Return up to ``k`` ranked hits: dicts with lineage + text + score +
         rank. Text comes from the engine; citation fields from docket's lineage
-        (joined on ``document_id``), empty (never invented) when unknown."""
+        (joined on ``document_id``), empty (never invented) when unknown.
+
+        Hits whose ``chunk_id`` has no lineage row are dropped — an orphan
+        (old delete bug, a mid-batch ingest failure, a benchmark run into the
+        prod collection) has no doc_id/page to cite, so ``Citation.from_hit``
+        would either invent one or raise. One warning is logged with the
+        dropped count rather than one log line per hit.
+        """
         if not self.lineage.chunks:
             return []
-        allowlist = (
-            [ch.chunk_id for ch in self.lineage.chunks if ch.doc_id == self.scope_doc]
-            if self.scope_doc
-            else None
-        )
+        if self.scope_doc:
+            allowlist = [ch.chunk_id for ch in self.lineage.chunks if ch.doc_id == self.scope_doc]
+            if not allowlist:
+                # The scope resolved to zero chunks. An empty allowlist reads
+                # as "no scope" to the real provider (and FakeEngine, which
+                # mirrors it) — falling through would silently search the
+                # WHOLE collection instead of the (empty) requested scope.
+                return []
+        else:
+            allowlist = None
         rows = self.provider.collection_search(
-            self.collection, query, mode=self.mode, k=candidates, allowlist=allowlist
+            self.collection, query, mode=self.mode, k=candidates if candidates is not None else self.candidates,
+            allowlist=allowlist,
         )
         if not rows:
             return []
@@ -73,25 +99,33 @@ class Retriever:
             ]
 
         hits = []
-        for rank, row in enumerate(rows[:k]):
-            lin = self.lineage._by_id.get(row["document_id"])
-            lin = self.lineage.chunks[lin] if lin is not None else None
+        dropped = 0
+        for row in rows:
+            lin = self.lineage.find(row["document_id"])
+            if lin is None:
+                dropped += 1
+                continue
             hits.append(
                 {
                     "chunk_id": row["document_id"],
-                    "doc_id": lin.doc_id if lin else row["document_id"].split("#")[0],
+                    "doc_id": lin.doc_id,
                     "engine_chunk_id": row["chunk_id"],
-                    "page": lin.page if lin else None,
+                    "page": lin.page,
                     "text": row["text"],
-                    "source": lin.source if lin else "",
-                    "form_type": lin.form_type if lin else "",
-                    "company": lin.company if lin else "",
-                    "ticker": lin.ticker if lin else "",
-                    "fiscal_period": lin.fiscal_period if lin else "",
+                    "source": lin.source,
+                    **{f: getattr(lin, f) for f in FILING_FIELDS},
                     "score": round(float(row["score"]), 6),
-                    "rank": rank,
                 }
             )
+            if len(hits) >= k:
+                break
+        if dropped:
+            log.warning(
+                "retrieve(%r): dropped %d engine hit(s) with no lineage row (orphaned chunk_id)",
+                query, dropped,
+            )
+        for rank, hit in enumerate(hits):
+            hit["rank"] = rank
         return hits
 
     def iterative_retrieve(self, queries: Sequence[str], *, k: int = 10) -> list[dict]:

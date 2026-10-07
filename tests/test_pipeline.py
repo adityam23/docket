@@ -45,7 +45,8 @@ def test_corpus_remove_and_doc_ids():
     assert c.doc_ids() == ["b"] and len(c) == before - removed
     # id index was rebuilt: every surviving chunk is still addressable
     for ch in c.chunks:
-        assert c.get(ch.chunk_id) is ch
+        assert c.find(ch.chunk_id) is ch
+    assert c.find("no-such-chunk") is None  # unknown id -> None, never a KeyError
     assert c.remove("a") == 0  # removing a gone doc is a no-op
 
 
@@ -57,7 +58,7 @@ def test_lineage_persists_without_text(tmp_path):
     loaded = Corpus.load(str(tmp_path))
     assert [ch.chunk_id for ch in loaded.chunks] == [ch.chunk_id for ch in c.chunks]
     first = c.chunks[0]
-    back = loaded.get(first.chunk_id)
+    back = loaded.find(first.chunk_id)
     assert back.doc_id == first.doc_id and back.page == first.page
     assert back.source == first.source
 
@@ -197,6 +198,44 @@ def test_scope_doc_restricts_engine_allowlist():
     assert {h["doc_id"] for h in hits} == {"bill-2"}
 
 
+def test_scope_doc_with_no_lineage_returns_empty_not_whole_collection():
+    # scope_doc names a doc with NO lineage rows (stale/retired/typo'd id) ->
+    # the allowlist resolves to []. An EMPTY allowlist reads as "no scope" to
+    # the real provider (FakeEngine mirrors that semantics) -- falling
+    # through to collection_search would silently search the WHOLE
+    # collection instead of the (empty) requested scope.
+    chunks = _multi_doc_chunks()
+    r = retriever_over(chunks, scope_doc="no-such-doc")
+    hits = r.retrieve("monthly charge", k=10)
+    assert hits == []
+    assert r.provider.last_allowlist is None  # engine search was never reached
+
+
+def test_retrieve_drops_orphaned_hits_and_warns(caplog):
+    # An engine hit whose chunk_id has no lineage row (old delete bug,
+    # mid-batch ingest failure, a benchmark run into the prod collection) has
+    # no doc_id/page to cite -- it must be dropped, not surfaced with page=None
+    # (which previously blew up Citation.from_hit's `page: int`).
+    from docket.retrieval.retriever import Retriever
+
+    chunks = acme_chunks()
+    orphan = chunk_pages(
+        [{"page": 1, "text": "orphan chunk with revenue mentioned but no lineage row"}],
+        doc_id="ghost", words=8, overlap=0,
+    )
+    engine = FakeEngine(chunks + orphan, rank="all")
+    corpus = Corpus()
+    corpus.add(chunks)  # lineage deliberately omits the orphan chunk
+
+    r = Retriever(engine, corpus, collection="docket")
+    with caplog.at_level("WARNING"):
+        hits = r.retrieve("revenue", k=10)
+
+    assert {h["chunk_id"] for h in hits} == {ch.chunk_id for ch in chunks}
+    assert all(h["page"] is not None for h in hits)
+    assert any("lineage" in rec.message.lower() for rec in caplog.records)
+
+
 def test_iterative_retrieve_merges_and_dedups():
     chunks = chunk_pages(
         [{"page": 1, "text": "revenue grew ten million"}], doc_id="d", words=6, overlap=0)
@@ -214,6 +253,31 @@ def test_answer_is_grounded_cited_and_scored():
     assert res.reliability == "high"           # low surprisal logprobs
     assert res.citations and res.citations[0].doc_id == "acme-10k"
     assert res.hits
+
+
+def test_answer_without_markers_has_no_citations():
+    # No [n] marker in the model's text -> no citations. Citing hit 1 anyway
+    # (the old fallback) fakes grounding for text the model never anchored.
+    r = retriever_over(acme_chunks())
+    res = answer(
+        "What was revenue?", retriever=r,
+        provider=FakeEngine(text="Revenue was ten million dollars."),
+        settings=Settings(),
+    )
+    assert res.citations == []
+
+
+def test_refusal_has_no_citations():
+    from docket.agent.graph import REFUSAL
+
+    r = retriever_over(acme_chunks())
+    res = answer(
+        "What was revenue?", retriever=r,
+        provider=FakeEngine(text=REFUSAL),
+        settings=Settings(),
+    )
+    assert res.answer == REFUSAL
+    assert res.citations == []
 
 
 def test_answer_low_confidence_label():
@@ -271,6 +335,26 @@ def test_parse_number_units_and_multipliers():
         parse_number("n/a")
 
 
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        # Suffix must be a whole word, not any string starting with it.
+        ("$1,200 monthly", (1200.0, "USD")),     # "monthly" is not the "m" (million) suffix
+        ("5 bps", (5.0, "")),                     # "bps" is not the "b" (billion) suffix
+        ("12 months", (12.0, "")),                # "months" is not the "m" (million) suffix
+        ("$500 mid-year", (500.0, "USD")),        # "mid-year" is not the "m" (million) suffix
+        # Suffixes that ARE the whole word still apply.
+        ("1.5M", (1_500_000.0, "")),
+        ("3.2 billion", (3_200_000_000.0, "")),
+        # Accounting parentheses denote negative.
+        ("($1,234)", (-1234.0, "USD")),
+        ("(1,234)", (-1234.0, "")),
+    ],
+)
+def test_parse_number_suffix_word_boundary_and_parens(raw, expected):
+    assert parse_number(raw) == expected
+
+
 def test_aggregate_ops_and_unit_guard():
     usd = [{"value": "$10"}, {"value": "$20"}, {"value": "$30"}]
     s = aggregate("sum", usd)
@@ -287,11 +371,39 @@ def test_aggregate_ops_and_unit_guard():
 
 def test_plan_operation_classifies():
     assert plan_operation("What is the total monthly charge across all documents?").name == "sum"
-    assert plan_operation("What is the average monthly bill?").name == "mean"
-    assert plan_operation("Which vendor charges the highest fee?").name == "max"
-    assert plan_operation("How many invoices are there?").name == "count"
+    assert plan_operation("What is the average monthly bill across all accounts?").name == "mean"
+    assert plan_operation("Which vendor charges the highest fee, combined across all vendors?").name == "max"
+    assert plan_operation("How many invoices are there, added up across all vendors?").name == "count"
     assert plan_operation("How much do I pay per month across my subscriptions?").name == "sum"
     assert plan_operation("What was revenue in 2023?") is None  # plain QA, untouched
+
+
+@pytest.mark.parametrize(
+    "question,expected",
+    [
+        # Positive: an explicit multi-item/across-documents signal is present
+        # alongside the op keyword, so the roll-up path is genuinely warranted.
+        ("What is the average revenue across all segments?", "mean"),
+        ("What is the combined revenue of all subsidiaries?", "sum"),
+        ("Sum of all R&D expenses across each of the filings.", "sum"),
+        ("What was the highest revenue among all reporting segments?", "max"),
+        ("What is the total of combined assets for both Company A and Company B?", "sum"),
+        ("How many of the filings, combined, mention a material weakness?", "count"),
+        # Negative: single-entity, single-period metric questions — plain QA
+        # even though they contain an _OP_TRIGGERS keyword. These are the
+        # FinanceBench single-fact questions this ticket stops mis-routing.
+        ("What is the FY2017 operating cash flow ratio for Adobe?", None),
+        ("What was the year end FY2019 total amount of inventories for Adobe?", None),
+        ("What is total revenue for Adobe in FY2017?", None),
+        ("What is the total number of shares outstanding?", None),
+        ("How many employees does Adobe have?", None),
+        ("What was the highest revenue reported this year?", None),
+        ("What was revenue in 2023?", None),
+    ],
+)
+def test_plan_operation_requires_cross_scope_signal(question, expected):
+    op = plan_operation(question)
+    assert (op.name if op else None) == expected
 
 
 def _multi_doc_chunks():

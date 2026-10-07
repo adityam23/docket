@@ -13,6 +13,8 @@ import json
 import os
 from dataclasses import asdict, dataclass
 
+from .chunk import FILING_FIELDS
+
 
 @dataclass(frozen=True)
 class Lineage:
@@ -37,11 +39,8 @@ def _lineage_of(chunk) -> Lineage:
         doc_id=chunk.doc_id,
         page=chunk.page,
         source=chunk.source,
-        form_type=chunk.form_type,
-        company=chunk.company,
-        ticker=chunk.ticker,
-        fiscal_period=chunk.fiscal_period,
         chars=len(chunk.text),
+        **{f: getattr(chunk, f) for f in FILING_FIELDS},
     )
 
 
@@ -65,8 +64,13 @@ class Corpus:
             self._by_id[row.chunk_id] = len(self.chunks)
             self.chunks.append(row)
 
-    def get(self, chunk_id: str) -> Lineage:
-        return self.chunks[self._by_id[chunk_id]]
+    def find(self, chunk_id: str) -> Lineage | None:
+        """Look up a chunk's lineage, or ``None`` when the id has no row (an
+        orphaned engine hit — old delete bug, mid-batch ingest failure, a
+        benchmark run that wrote into the prod collection). Callers must treat
+        ``None`` as "can't cite this", never invent a row for it."""
+        i = self._by_id.get(chunk_id)
+        return self.chunks[i] if i is not None else None
 
     def doc_ids(self) -> list[str]:
         """Distinct document ids in stable first-seen order."""

@@ -29,6 +29,31 @@ def test_extract_non_filing_is_empty():
     assert m == {"form_type": "", "company": "", "ticker": "", "fiscal_period": ""}
 
 
+def test_form_type_not_matched_from_full_path_substring():
+    # The directory "lars" contains "ars" -- matching the FULL path would read
+    # this as form type "ARS". Matching is basename-only, so it must not.
+    m = extract_filing_metadata("report", "/home/lars/filings/report.pdf")
+    assert m["form_type"] == ""
+
+
+def test_form_type_alias_requires_word_boundary():
+    # "ars" must not match inside an ordinary word in the basename either.
+    m = extract_filing_metadata("quarterly-notes", "cars-financial-summary.pdf")
+    assert m["form_type"] == ""
+
+
+def test_year_not_matched_inside_a_longer_digit_run():
+    # "0000320193" (a CIK/accession-like digit run) contains the substring
+    # "2019" but is not a standalone year -- it must not be extracted as one.
+    m = extract_filing_metadata("0000320193-annual")
+    assert m["fiscal_period"] == ""
+
+
+def test_year_still_matched_when_standalone():
+    m = extract_filing_metadata("3M_2018_10K")
+    assert m["fiscal_period"] == "2018"
+
+
 def test_chunk_threads_metadata():
     chunks = chunk_text(
         "revenue grew", doc_id="3M_2018_10K",
@@ -62,6 +87,31 @@ def test_hit_and_view_carry_metadata(monkeypatch):
     assert hits and hits[0]["form_type"] == "10-K"
     view = hit_view(hits[0])
     assert view["form_type"] == "10-K" and view["company"] == "3M"
+
+
+def test_citation_from_hit_carries_filing_identity():
+    from docket.report.schema import Citation
+
+    from .fakes import retriever_over
+
+    chunks = chunk_text("revenue grew", doc_id="3M_2018_10K",
+                        form_type="10-K", company="3M", ticker="MMM", fiscal_period="2018")
+    hit = retriever_over(chunks, rank="all").retrieve("revenue", k=1)[0]
+    c = Citation.from_hit(hit)
+    assert c.form_type == "10-K" and c.company == "3M"
+    assert c.ticker == "MMM" and c.fiscal_period == "2018"
+
+
+def test_citation_from_hit_leaves_unknown_identity_as_none():
+    from docket.report.schema import Citation
+
+    from .fakes import retriever_over
+
+    chunks = chunk_text("plain text, not a filing", doc_id="misc")
+    hit = retriever_over(chunks, rank="all").retrieve("plain", k=1)[0]
+    c = Citation.from_hit(hit)
+    assert c.form_type is None and c.company is None
+    assert c.ticker is None and c.fiscal_period is None
 
 
 def test_corpus_stats_surfaces_metadata(tmp_path):

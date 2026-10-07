@@ -66,9 +66,7 @@ def compute_metric(name: str, **fields: float) -> float:
         if prev == 0:
             raise ZeroDivisionError("previous value is zero")
         return (fields["current"] - prev) / prev
-    if n == "margin":  # numerator / revenue
-        return fields["numerator"] / fields["denominator"]
-    if n == "ratio":
+    if n == "margin" or n == "ratio":  # numerator / denominator (same arithmetic)
         return fields["numerator"] / fields["denominator"]
     if n == "delta":
         return fields["current"] - fields["previous"]
@@ -98,14 +96,22 @@ def parse_number(raw: object) -> tuple[float, str]:
     if isinstance(raw, (int, float)) and not isinstance(raw, bool):
         return float(raw), ""
     s = str(raw).strip()
+    # Accounting negative: a value wrapped in parentheses, e.g. "($1,234)" or
+    # "(1,234)", is negative by convention even though no "-" appears.
+    negative = s.startswith("(") and s.endswith(")")
     m = _NUM.search(s)
     if not m:
         raise ValueError(f"no number in {raw!r}")
     val = float(m.group(0).replace(",", ""))
+    if negative:
+        val = -abs(val)
     low = s.lower()
     tail = low[m.end():].lstrip(" ")
     for suf, mult in _MULT.items():
-        if tail.startswith(suf):
+        # Anchored as a whole word: "m" must not match inside "monthly",
+        # "b" must not match inside "bps", etc. (`\b` needs no following
+        # char when the suffix runs to the end of ``tail``.)
+        if re.match(rf"{re.escape(suf)}\b", tail):
             val *= mult
             break
     if "%" in s:
