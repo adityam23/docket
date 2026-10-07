@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import base64
 import binascii
-import json
 import os
 import queue
 import threading
@@ -52,6 +51,7 @@ from ..service import remove_document
 from ..service import trace_store
 from .jobs import JOBS, sweep_stale_uploads
 from .observability import capacity_stats, config_view, corpus_stats
+from .sse import sse
 
 # Cap browser-uploaded ingests so a stray selection can't exhaust memory/disk.
 # _MAX_FILE_BYTES bounds any SINGLE PDF (a huge scan shouldn't be ingestible);
@@ -364,7 +364,7 @@ def api_ask_stream(question: str, session_id: str | None = None) -> StreamingRes
             if item is None:
                 break
             event, data = item
-            yield f"event: {event}\ndata: {json.dumps(data)}\n\n"
+            yield sse(data, event=event)
 
     return StreamingResponse(
         frames(),
@@ -493,8 +493,10 @@ def api_engine_profile(req: EngineProfileRequest) -> dict:
 @app.get("/api/engine/supervision")
 def api_engine_supervision() -> dict:
     """The supervisor's honest view of mettled's lifecycle: ``offline`` /
-    ``starting`` / ``available`` / ``failed`` — the SPA renders engine state
-    instead of guessing (cutover contract §3/§5: never a silent substitute)."""
+    ``starting`` / ``available`` / ``degraded`` / ``incompatible`` / ``failed``,
+    plus the readiness ``phase``/``reason``/``detail`` mettle reported (residency
+    contract D2) — the SPA renders engine state instead of guessing (cutover
+    contract §3/§5: never a silent substitute)."""
     return get_supervisor(load_settings()).view()
 
 
@@ -503,15 +505,32 @@ def api_engine_restart() -> dict:
     """Manual restart — the only exit from the supervisor's terminal
     ``failed`` state. Resets the backoff budget and kicks the loop; the loop's
     next cycle decides the state."""
-    get_supervisor(load_settings()).restart()
-    return get_supervisor(load_settings()).view()
+    sup = get_supervisor(load_settings())
+    sup.restart()
+    return sup.view()
+
 
 @app.get("/api/engine/events")
-def api_engine_events() -> StreamingResponse:
+async def api_engine_events() -> StreamingResponse:
     """Proxy the engine's SSE event stream (replays the last 100 on connect) to
     the SPA, which drives live activation progress. The SPA never talks to the
-    engine or holds its bearer token."""
-    return StreamingResponse(engine_events_stream(load_settings()), media_type="text/event-stream")
+    engine or holds its bearer token.
+
+    ``engine_events_stream`` yields parsed JSON payloads and raises on failure;
+    this is the one place that frames them as SSE text (via ``sse()``), so a
+    payload or error message containing a quote can never break the wire
+    format. mettle's events keepalive is a contractual 15 s (Q6) and the
+    client has a 30 s read timeout (see ``engine_events_stream``), so a
+    disconnected client or dead engine releases this proxy within that bound.
+    """
+    async def frames():
+        try:
+            async for payload in engine_events_stream(load_settings()):
+                yield sse(payload)
+        except Exception as e:  # noqa: BLE001 - surface as one error frame, then close
+            yield sse({"message": str(e)}, event="error")
+
+    return StreamingResponse(frames(), media_type="text/event-stream")
 
 
 def _start_job(start, *args) -> dict:

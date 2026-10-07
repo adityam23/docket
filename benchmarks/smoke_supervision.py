@@ -1,14 +1,23 @@
 """Throwaway smoke test for the engine-supervision lifecycle (cutover contract
-§3) — run manually, not part of pytest. Exercises the REAL supervisor loop
-against a real fake engine process:
+§3, residency contract D1/D2) — run manually, not part of pytest. Exercises the
+REAL supervisor loop, probing ``GET /engine/ready``, against real fake engine
+processes/servers:
 
-1. engine answering /engine/status, binary unset   -> probe-only: available
-2. engine dies, binary unset                       -> offline (loud, no spawn)
-3. binary configured, engine dies mid-run          -> respawn + recover
+1. engine answering /engine/ready 200, binary unset -> probe-only: available
+2. engine dies, binary unset                        -> offline (loud, no spawn)
+3. binary configured, engine dies mid-run           -> respawn + recover
+4. stop() kills the spawned engine's process group
+5. alive-but-slow child stays patient (no budget spent) until it answers
+6. startup ceiling kills a child that never answers; the attempt counts
+7. mettled exit 98 (port held by a foreign engine) -> offline, terminal
+8. /engine/ready 503 with a downloading phase       -> starting, phase surfaced
+9. /engine/ready 404 (old engine)                   -> incompatible, never ready
+10. restart() un-sticks the 'failed' terminal state (the D1 restart() bug)
 
 Run: uv run python benchmarks/smoke_supervision.py
 """
 import http.server
+import json
 import os
 import signal
 import socket
@@ -57,6 +66,20 @@ def wait_state(sup: EngineSupervisor, want: str, timeout: float = 45.0) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if sup.view()["state"] == want:
+            return True
+        time.sleep(0.2)
+    return False
+
+
+def wait_reason(sup: EngineSupervisor, timeout: float = 45.0) -> bool:
+    """Wait for view()['reason'] to be set. Unlike ``wait_state(sup,
+    "offline", ...)``, this can't false-positive on the constructor's initial
+    ``state == "offline"`` default (observable before the supervisor thread
+    has done anything) -- ``reason`` starts (and stays) ``None`` until a real
+    code path (e.g. exit-98 handling) sets it."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if sup.view()["reason"]:
             return True
         time.sleep(0.2)
     return False
@@ -219,6 +242,148 @@ def main() -> int:
     else:
         failures.append(f"6b: respawned engine orphaned (pid={v4['pid']})")
         print("[FAIL] 6b: respawned engine still alive")
+
+    # --- 7. mettled exit 98 (§1.6): a foreign engine holds the port --------
+    # -> offline, terminal: no respawn loop, ever (another attempt would just
+    # collide with the same foreign engine again).
+    port7 = free_port()
+    held98 = os.path.join(tempfile.mkdtemp(), "held98-mettled")
+    with open(held98, "w") as f:
+        f.write("#!/bin/sh\nexit 98\n")
+    os.chmod(held98, 0o755)
+    sup7 = EngineSupervisor(Settings(backend_url=f"http://127.0.0.1:{port7}/v1", engine_binary=held98))
+    sup7.ensure()
+    if wait_reason(sup7, timeout=15.0):
+        v7 = sup7.view()
+        if v7["state"] == "offline" and v7["reason"] and "98" in v7["reason"] and v7["pid"] is None:
+            print(f"[ok] 7a: exit 98 -> offline, reason={v7['reason']!r}")
+        else:
+            failures.append(f"7a: unexpected view after exit 98: {v7}")
+            print("[FAIL] 7a:", v7)
+        time.sleep(3.0)  # no respawn loop: state/pid must not move afterwards
+        v7b = sup7.view()
+        if v7b["state"] == "offline" and v7b["pid"] is None:
+            print("[ok] 7b: no respawn loop after exit 98")
+        else:
+            failures.append(f"7b: respawn loop after exit 98: {v7b}")
+            print("[FAIL] 7b:", v7b)
+    else:
+        failures.append(f"7: never went offline after exit 98: {sup7.view()}")
+        print("[FAIL] 7:", sup7.view())
+    sup7.stop()
+
+    # --- 8. /engine/ready 503 downloading -> starting, phase surfaced -------
+    class _ReadyDownloadingHandler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            body = json.dumps({
+                "ready": False,
+                "phase": {"phase": "downloading", "model": "m", "bytes_done": 1, "bytes_total": 10},
+                "reason": "loading",
+            }).encode()
+            self.send_response(503)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):  # silence
+            pass
+
+    port8 = free_port()
+    srv8 = http.server.ThreadingHTTPServer(("127.0.0.1", port8), _ReadyDownloadingHandler)
+    threading.Thread(target=srv8.serve_forever, daemon=True).start()
+    sup8 = EngineSupervisor(Settings(backend_url=f"http://127.0.0.1:{port8}/v1", engine_binary=None))
+    sup8.ensure()
+    if wait_state(sup8, "starting", timeout=10.0):
+        v8 = sup8.view()
+        if v8["phase"].get("phase") == "downloading":
+            print("[ok] 8: 503 downloading -> starting, phase surfaced")
+        else:
+            failures.append(f"8: phase not surfaced: {v8}")
+            print("[FAIL] 8:", v8)
+    else:
+        failures.append(f"8: never reached starting for 503: {sup8.view()}")
+        print("[FAIL] 8:", sup8.view())
+    sup8.stop()
+    srv8.shutdown()
+    srv8.server_close()
+
+    # --- 9. /engine/ready 404 (old engine) -> incompatible, never ready -----
+    class _ReadyMissingHandler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            body = b'{"error":"not found"}'
+            self.send_response(404)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):  # silence
+            pass
+
+    port9 = free_port()
+    srv9 = http.server.ThreadingHTTPServer(("127.0.0.1", port9), _ReadyMissingHandler)
+    threading.Thread(target=srv9.serve_forever, daemon=True).start()
+    sup9 = EngineSupervisor(Settings(backend_url=f"http://127.0.0.1:{port9}/v1", engine_binary=None))
+    sup9.ensure()
+    if wait_state(sup9, "incompatible", timeout=10.0):
+        v9 = sup9.view()
+        if v9["reason"] and "too old" in v9["reason"]:
+            print("[ok] 9: 404 on /engine/ready -> incompatible, never ready")
+        else:
+            failures.append(f"9: reason missing/wrong: {v9}")
+            print("[FAIL] 9:", v9)
+    else:
+        failures.append(f"9: never reached incompatible for 404: {sup9.view()}")
+        print("[FAIL] 9:", sup9.view())
+    sup9.stop()
+    srv9.shutdown()
+    srv9.server_close()
+
+    # --- 10. restart() un-sticks 'failed' (the D1 restart() bug) ------------
+    # Before the fix, restart() reset `attempts` outside the lock and never
+    # set `_wake`, so the `failed` loop (which waits only on `_wake`/`_stop`)
+    # never left `failed`. The respawn-after-restart cycle can complete faster
+    # than any sampling interval can reliably observe a transient non-'failed'
+    # state, so the binary itself records each invocation to a counter file --
+    # that's the actual signal: did restart() cause ANOTHER spawn attempt.
+    port10 = free_port()  # nothing ever listens here -- the binary always crashes first
+    crash_dir = tempfile.mkdtemp()
+    crash = os.path.join(crash_dir, "always-crash-mettled")
+    counter = os.path.join(crash_dir, "invocations")
+    with open(crash, "w") as f:
+        f.write(f"#!/bin/sh\necho x >> {counter}\nexit 1\n")
+    os.chmod(crash, 0o755)
+    sup10 = EngineSupervisor(Settings(backend_url=f"http://127.0.0.1:{port10}/v1", engine_binary=crash))
+    sup10._BACKOFF_S = (0.1,)  # instance override: tiny budget, reach 'failed' fast
+    sup10.ensure()
+
+    def invocations() -> int:
+        try:
+            with open(counter) as f:
+                return sum(1 for _ in f)
+        except FileNotFoundError:
+            return 0
+
+    if wait_state(sup10, "failed", timeout=15.0):
+        print("[ok] 10a: exhausted budget -> failed")
+        before = invocations()
+        sup10.restart()
+        respawned = False
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if invocations() > before:
+                respawned = True
+                break
+            time.sleep(0.02)
+        if respawned:
+            print("[ok] 10b: restart() un-stuck the 'failed' loop (binary re-invoked)")
+        else:
+            failures.append("10b: restart() did not unstick 'failed' (regression)")
+            print("[FAIL] 10b: still stuck in failed after restart()")
+    else:
+        failures.append(f"10a: never reached failed: {sup10.view()}")
+        print("[FAIL] 10a:", sup10.view())
+    sup10.stop()
 
     print()
     if failures:

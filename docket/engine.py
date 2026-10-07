@@ -11,36 +11,49 @@ Capability-detect once: a backend that answers ``GET /engine/profiles`` is a
 mettle-class engine with a profile surface; anything else 404s it and the whole
 feature is hidden — the same pattern as ``Capability`` in ``providers/base.py``.
 
-**Supervision (§3):** docket's backend owns mettled's lifecycle. On startup the
-:class:`EngineSupervisor` probes ``/engine/status``; if it doesn't answer it
-spawns the configured ``mettled`` binary, health-probes until ready, and
-restarts on crash with exponential backoff (1→2→4→8→16 s, 5 attempts) before
-declaring a hard ``failed`` state (manual restart via :meth:`EngineSupervisor.restart`).
-Binary path unset ⇒ probe-only, never spawn. Engine code is never imported.
+**Supervision (§3, residency contract D1/D2):** docket's backend owns mettled's
+lifecycle. The :class:`EngineSupervisor` probes ``GET /engine/ready`` — the
+single readiness gate (mettle contract, 2026-10-06): 200 = ready, 503 =
+alive-but-not-ready carrying a structured ``phase``/``reason``/``detail`` body,
+404 = "engine too old" (never treated as ready). Liveness (is the process up at
+all) is "the connection succeeded", independent of status code; the engine is
+declared dead only after 3 CONSECUTIVE connection errors/timeouts (a 503/404 is
+alive, not a failure — mettle's Q5 answer). Binary path unset ⇒ probe-only,
+never spawn. mettled exit code 98 (§1.6) means a foreign engine holds the
+port: state ``offline``, no respawn loop. Engine code is never imported.
+
+States: ``offline`` (not answering, not supervised — or exit-98 final),
+``starting`` (spawned/alive, not yet ready, within the startup ceiling),
+``available`` (``/engine/ready`` == 200), ``degraded`` (alive, not ready, and
+the engine itself reports a failed phase or an unrecognised body), and
+``incompatible`` (alive, but 404s ``/engine/ready`` — too old to speak the
+readiness contract), or ``failed`` (restart budget exhausted — manual restart
+via :meth:`EngineSupervisor.restart`).
 
 The ``engine`` surface is mounted at the server ROOT (``/engine/*``), NOT under
 the OpenAI ``/v1`` base that ``backend_url`` points at — so the base is derived by
 stripping the trailing ``/v1`` (see :func:`_engine_base`).
 """
 
+from __future__ import annotations
+
+import json
 import os
 import signal
+import socket
 import subprocess
 import threading
 import time
-from typing import Iterator
+from typing import AsyncIterator, Callable
+from urllib.parse import urlparse
 
 import httpx
 
 from .config import Settings, load_settings
 
-_PROBE_TTL = 5.0  # seconds; a positive probe is cached so role: resolution doesn't hammer the engine
-_positive_cache: dict[str, float] = {}
-
 
 def _headers(settings: Settings) -> dict[str, str]:
-    key = getattr(settings, "engine_key", None)
-    return {"Authorization": f"Bearer {key}"} if key else {}
+    return {"Authorization": f"Bearer {settings.engine_key}"} if settings.engine_key else {}
 
 
 def _engine_base(settings: Settings) -> str:
@@ -55,6 +68,9 @@ def _engine_base(settings: Settings) -> str:
 
 
 def _get(settings: Settings, path: str, timeout: float = 5.0) -> httpx.Response | None:
+    """The one synchronous GET helper for every ``/engine/*`` read — profile
+    reads, status/device, and the supervisor's readiness probe all go through
+    this (CLAUDE.md: one concept, one implementation)."""
     url = _engine_base(settings) + path
     try:
         return httpx.get(url, headers=_headers(settings), timeout=timeout)
@@ -62,21 +78,17 @@ def _get(settings: Settings, path: str, timeout: float = 5.0) -> httpx.Response 
         return None
 
 
+def _put(settings: Settings, path: str, json_body: dict, timeout: float = 10.0) -> httpx.Response | None:
+    """The PUT counterpart to :func:`_get` (engine activation today)."""
+    url = _engine_base(settings) + path
+    try:
+        return httpx.put(url, json=json_body, headers=_headers(settings), timeout=timeout)
+    except httpx.HTTPError:
+        return None
+
+
 def _json(resp: httpx.Response | None, default: dict) -> dict:
     return default if resp is None else (resp.json() if resp.status_code == 200 else default)
-
-
-def engine_available(settings: Settings) -> bool:
-    """True when the backend exposes the engine-management surface. Positive
-    results are cached briefly; negatives are re-probed (cheap GET)."""
-    base = settings.backend_url
-    if base in _positive_cache:
-        return True
-    resp = _get(settings, "/engine/profiles")
-    if resp is not None and resp.status_code == 200:
-        _positive_cache[base] = 0.0
-        return True
-    return False
 
 
 def engine_view(settings: Settings) -> dict:
@@ -89,70 +101,76 @@ def engine_view(settings: Settings) -> dict:
     out["available"] = True
     out["status"] = _json(_get(settings, "/engine/status"), {})
     out["device"] = _json(_get(settings, "/engine/device"), {})
-    # Positive probe cached so the SPA's repeated GET /api/engine is cheap.
-    _positive_cache[settings.backend_url] = 0.0
     return out
 
 
 def engine_activate(settings: Settings, name: str) -> tuple[int, dict]:
     """Ask the engine to switch to ``name``. Returns ``(status, body)``:
     202 accepted (completion streams on ``engine_events``), 404 unknown profile,
-    409 switch already in flight, 503 busy."""
-    url = _engine_base(settings) + "/engine/profiles/active"
-    try:
-        r = httpx.put(url, json={"name": name}, headers=_headers(settings), timeout=10.0)
-    except httpx.HTTPError as e:  # noqa: BLE001
-        return 0, {"error": str(e)}
+    409 switch already in flight, 503 busy, 0 if the engine is unreachable."""
+    resp = _put(settings, "/engine/profiles/active", {"name": name})
+    if resp is None:
+        return 0, {"error": "engine unreachable"}
     body: dict = {}
     try:
-        body = r.json()
+        body = resp.json()
     except ValueError:
         pass
-    return r.status_code, body
+    return resp.status_code, body
 
 
-def engine_events_stream(settings: Settings) -> Iterator[str]:
-    """Replay the engine's SSE event stream (last 100 replayed on connect by the
-    engine). Yields SSE-framed text lines so the web adapter can proxy them
-    unchanged to the SPA — the SPA never holds the engine's bearer token."""
+async def engine_events_stream(settings: Settings) -> AsyncIterator[dict]:
+    """Replay the engine's SSE event stream (last 100 replayed on connect) as
+    parsed JSON payloads. The web layer frames each payload as one SSE event via
+    ``docket.web.sse.sse()`` — hand-building the frame text here was the bug
+    (f-string JSON breaks on a message containing a quote); this function raises
+    instead, and the web layer frames the error the same way as every other
+    event.
+
+    Async + a bounded read timeout: mettle's ``/engine/events`` keepalive is a
+    contractual 15 s (Q6), so a 30 s read timeout is a >1 keepalive-interval
+    margin. If the engine dies or the client walks away, the underlying
+    ``httpx`` read raises within that bound and this generator unwinds —
+    releasing the proxying task instead of blocking it indefinitely.
+    """
     url = _engine_base(settings) + "/engine/events"
-    try:
-        with httpx.stream("GET", url, headers=_headers(settings), timeout=None) as r:
+    timeout = httpx.Timeout(connect=5.0, read=30.0, write=5.0, pool=5.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        async with client.stream("GET", url, headers=_headers(settings)) as r:
             if r.status_code != 200:
-                yield f'event: error\ndata: {{"status": {r.status_code}}}\n\n'
-                return
-            for line in r.iter_lines():
-                # Drop `event:` lines so every payload is a default `data:`
+                raise RuntimeError(f"engine returned {r.status_code} for /engine/events")
+            async for line in r.aiter_lines():
+                # Drop `event:` lines so every payload is treated as a default
                 # message — the SPA's EventSource.onmessage then catches ALL
                 # events (named events would need addEventListener per name).
                 # The JSON `data` payload already carries the event type.
-                if line.startswith("event:"):
+                if not line.startswith("data:"):
                     continue
-                if line:
-                    yield line + "\n"
-                else:
-                    yield "\n"  # SSE event separator (blank line)
-    except httpx.HTTPError as e:  # noqa: BLE001
-        yield f'event: error\ndata: {{"message": "{e}"}}\n\n'
+                payload = line[len("data:"):].strip()
+                if not payload:
+                    continue
+                try:
+                    yield json.loads(payload)
+                except ValueError:
+                    continue
 
 
 def resolve_model(settings: Settings, model_id: str) -> str:
     """Resolve a ``role:<kind>`` alias to the active profile's slot id so a
     profile switch automatically re-points chat/embed/rerank. Anything that is
     NOT a ``role:`` alias passes through unchanged, and when the engine surface
-    is absent the alias is passed through too (the backend errors, surfaced
-    properly) — no silent substitution."""
+    is absent (or unreachable) the alias is passed through too (the backend
+    errors, surfaced properly) — no silent substitution."""
     if not model_id.startswith("role:"):
         return model_id
     role = model_id[len("role:"):]
-    if not engine_available(settings):
-        return model_id
     data = _get(settings, "/engine/profiles")
     if data is None or data.status_code != 200:
         return model_id
-    active = data.json().get("active")
+    body = data.json()
+    active = body.get("active")
     slots: list[dict] = []
-    for p in data.json().get("profiles", []):
+    for p in body.get("profiles", []):
         if p.get("name") == active:
             slots = p.get("slots", [])
             break
@@ -165,19 +183,39 @@ def resolve_model(settings: Settings, model_id: str) -> str:
     return role_slots[0].get("id") or model_id
 
 
-class EngineSupervisor:
-    """Spawn + health-probe + crash-restart mettled (cutover contract §3).
+def _engine_host_port(settings: Settings) -> tuple[str, int | None]:
+    u = urlparse(_engine_base(settings))
+    return u.hostname or "127.0.0.1", u.port
 
-    States: ``offline`` (not answering, not supervised), ``starting`` (spawned,
-    probing), ``available`` (probe answers), ``failed`` (restart budget
-    exhausted — manual restart required). Binary path unset ⇒ probe-only:
-    states move between ``offline`` and ``available``, never spawn.
+
+class EngineSupervisor:
+    """Spawn + health-probe + crash-restart mettled (cutover contract §3,
+    residency contract D1/D2).
+
+    States: see module docstring. Binary path unset ⇒ probe-only: states move
+    between ``offline``/``starting``/``available``/``degraded``/``incompatible``,
+    never spawn.
     """
 
     _BACKOFF_S = (1.0, 2.0, 4.0, 8.0, 16.0)  # restart budget: 5 attempts
 
-    def __init__(self, settings: Settings) -> None:
-        self._settings = settings
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        *,
+        settings_fn: Callable[[], Settings] | None = None,
+    ) -> None:
+        # ``settings_fn``, when given, is re-invoked once per supervision cycle
+        # (every probe) so a Settings-page change to engine_binary/backend_url/
+        # mettle_config/engine_key takes effect without a restart — the operator
+        # decision behind live-reload. Tests/benchmarks that construct a fixed
+        # ``Settings()`` directly (no ``settings_fn``) keep static behaviour, so
+        # a custom backend_url/engine_binary they pass is never silently
+        # overridden by the real environment.
+        self._settings_fn = settings_fn
+        self._settings = settings if settings is not None else (
+            settings_fn() if settings_fn else load_settings()
+        )
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._wake = threading.Event()   # nudges the loop: restart() or stop
@@ -186,19 +224,101 @@ class EngineSupervisor:
         self.attempts = 0
         self.pid: int | None = None
         self._proc: subprocess.Popen | None = None
+        # Readiness detail surfaced via view() for the Settings/engine panel.
+        self.phase: dict = {}
+        self.reason: str | None = None
+        self.detail = None
+        # `/engine/status` additionally carries `active` (profile name) and
+        # `switching` (bool) (mettle, 2026-10-07) -- read-only here. Profile
+        # switching itself is a follow-up ticket; this supervisor only
+        # surfaces which phase the engine is in.
+        self.active: str | None = None
+        self.switching: bool | None = None
+        # §1.6/D1: a foreign engine holds the port (mettled exit 98). Terminal
+        # like ``failed``, but reported as ``offline`` — :meth:`restart` is the
+        # only exit, same as ``failed``.
+        self._port_held = False
 
-    # -- probe --------------------------------------------------------------
+    # -- settings -------------------------------------------------------------
 
-    def _probing(self) -> bool:
-        """True when ``/engine/status`` answers 200."""
+    def _refresh_settings(self) -> None:
+        if self._settings_fn is not None:
+            self._settings = self._settings_fn()
+
+    # -- probe (readiness gate, D2) ------------------------------------------
+
+    def _probe(self) -> dict:
+        """``GET /engine/ready``: 2 s timeout (mettle's Q5 recommendation).
+        Refreshes settings first, so this is the one place a changed
+        backend_url/engine_key takes effect. Returns ``{"alive", "code",
+        "body", "active", "switching"}`` — ``alive`` is True for ANY HTTP
+        response (connection succeeded), independent of status code; only a
+        connection error or timeout is a liveness failure.
+
+        ``active``/``switching`` come from a best-effort follow-up read of
+        ``/engine/status`` (mettle, 2026-10-07: that endpoint additionally
+        carries the active profile name and whether a switch is in flight).
+        docket does not implement profile switching here (a follow-up
+        ticket); this only surfaces what mettle already reports."""
+        self._refresh_settings()
+        resp = _get(self._settings, "/engine/ready", timeout=2.0)
+        if resp is None:
+            return {"alive": False, "code": None, "body": {}, "active": None, "switching": None}
         try:
-            r = httpx.get(
-                _engine_base(self._settings) + "/engine/status",
-                headers=_headers(self._settings), timeout=2.0,
-            )
-            return r.status_code == 200
-        except httpx.HTTPError:
-            return False
+            body = resp.json()
+        except ValueError:
+            body = {}
+        active, switching = self._read_status_meta()
+        return {
+            "alive": True, "code": resp.status_code, "body": body,
+            "active": active, "switching": switching,
+        }
+
+    def _read_status_meta(self) -> tuple[str | None, bool | None]:
+        """Best-effort ``active``/``switching`` from ``/engine/status``
+        (liveness-only, always 200 while the process is up). A failure here
+        never affects liveness/readiness — ``/engine/ready`` already decided
+        that — it just leaves ``active``/``switching`` unknown for this tick."""
+        resp = _get(self._settings, "/engine/status", timeout=2.0)
+        if resp is None:
+            return None, None
+        try:
+            body = resp.json()
+        except ValueError:
+            return None, None
+        return body.get("active"), body.get("switching")
+
+    @staticmethod
+    def _state_for_probe(probe: dict) -> tuple[str, dict]:
+        """Map one ``/engine/ready`` probe to ``(state, {"phase","reason",
+        "detail"})`` per the residency contract: 200 ready, 503 alive-but-not-
+        ready (structured body), 404 "too old" (never ready)."""
+        code, body = probe["code"], probe["body"]
+        if code == 200:
+            return "available", {"phase": body.get("phase", {})}
+        if code == 404:
+            return "incompatible", {"reason": "engine too old: no /engine/ready"}
+        if code == 503:
+            phase = body.get("phase") or {}
+            state = "degraded" if phase.get("phase") == "failed" else "starting"
+            return state, {
+                "phase": phase,
+                "reason": body.get("reason"),
+                "detail": body.get("detail"),
+            }
+        return "degraded", {"detail": body}
+
+    def _report_alive(self, probe: dict, *, reset_attempts: bool) -> None:
+        state, extra = self._state_for_probe(probe)
+        with self._lock:
+            self.state = state
+            if reset_attempts:
+                self.attempts = 0
+            self.phase = extra.get("phase", {})
+            self.reason = extra.get("reason")
+            self.detail = extra.get("detail")
+            self.active = probe.get("active")
+            self.switching = probe.get("switching")
 
     # -- spawn --------------------------------------------------------------
 
@@ -218,6 +338,25 @@ class EngineSupervisor:
             self.pid = proc.pid
             self._proc = proc
 
+    def _wait_for_port_free(self, timeout: float = 2.0) -> None:
+        """Bounded wait for the OS to release the port after we just killed our
+        own child (D1), before spawning the replacement — avoids a pointless
+        self-inflicted EADDRINUSE race. Not fatal if it never frees inside the
+        window: the spawn is attempted anyway, and a still-held port surfaces
+        as mettled's own exit 98 (§1.6) or a startup-ceiling failure, both
+        already handled."""
+        host, port = _engine_host_port(self._settings)
+        if port is None:
+            return
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                with socket.create_connection((host, port), timeout=0.2):
+                    pass
+            except OSError:
+                return  # nothing listening -- port is free
+            time.sleep(0.1)
+
     # -- lifecycle ----------------------------------------------------------
 
     def ensure(self) -> None:
@@ -232,9 +371,17 @@ class EngineSupervisor:
             self._thread.start()
 
     def restart(self) -> None:
-        """Manual restart (the ``failed`` state's only exit). Resets the budget
-        and kicks the loop; the next probe/spawn cycle decides the state."""
-        self.attempts = 0
+        """Manual restart — the only exit from the supervisor's terminal
+        ``failed`` state AND from the ``_port_held`` (exit-98) terminal state.
+        Resets the budget under the lock and wakes the loop; the next
+        probe/spawn cycle decides the state. (Bug fix: previously only reset
+        ``attempts`` outside the lock and never set ``_wake``, so the ``failed``
+        loop — which waits only on ``_wake``/``_stop`` — never saw this call and
+        POST /api/engine/restart could not leave ``failed``.)"""
+        with self._lock:
+            self.attempts = 0
+            self._port_held = False
+        self._wake.set()
 
     def _kill_group(self, proc: subprocess.Popen) -> None:
         """SIGTERM the spawned engine's process group, then SIGKILL whatever
@@ -263,34 +410,64 @@ class EngineSupervisor:
         except subprocess.TimeoutExpired:
             pass
 
-    def stop(self) -> None:
-        """Stop supervision AND the spawned engine (see :meth:`_kill_group`)."""
-        self._stop = True
-        self._wake.set()
+    def _reap_current(self) -> subprocess.Popen | None:
+        """Take ``self._proc``, clear our tracking, and :meth:`_kill_group` it
+        if still alive. Returns the reaped ``Popen`` (its ``.returncode`` is
+        set either by our own kill or by its own prior exit) so callers can
+        inspect the exit code — e.g. mettled's contractual 98 (§1.6, port held
+        by a foreign engine) — or ``None`` if there was nothing to reap. One
+        implementation for every "take + clear + kill" site: ``stop()``, the
+        stop()-race guard in ``_bring_up``, the startup-ceiling kill, and the
+        D1 never-spawn-over-a-live-child guard."""
         proc = self._proc
         self._proc = None
         self.pid = None
         if proc is not None:
             self._kill_group(proc)
+        return proc
+
+    def stop(self) -> None:
+        """Stop supervision AND the spawned engine (see :meth:`_kill_group`)."""
+        self._stop = True
+        self._wake.set()
+        self._reap_current()
 
     def view(self) -> dict:
-        """Supervision state for the SPA: honest ``offline/starting/...``."""
+        """Supervision state for the SPA: honest ``offline/starting/available/
+        degraded/incompatible/failed``, plus the readiness ``phase``/``reason``/
+        ``detail`` the engine reported (residency contract D2) so the UI can
+        render WHY, not just the state label. ``active``/``switching`` are
+        read-only passthroughs of mettle's ``/engine/status`` fields (2026-10-07)
+        — which profile is active and whether a switch is in flight; this
+        supervisor does not initiate switches itself (a follow-up ticket)."""
         with self._lock:
             return {
                 "state": self.state,
                 "pid": self.pid,
                 "binary": self._settings.engine_binary,
                 "attempts": self.attempts,
+                "phase": self.phase,
+                "reason": self.reason,
+                "detail": self.detail,
+                "active": self.active,
+                "switching": self.switching,
             }
 
     # -- the loop -----------------------------------------------------------
 
     def _loop(self) -> None:
         while not self._stop:
-            if self._probing():
-                with self._lock:
-                    self.state = "available"
-                    self.attempts = 0
+            if self._port_held:
+                # §1.6/D1 terminal: a foreign engine holds the port. No probe,
+                # no spawn, no respawn loop -- another attempt would just
+                # collide again. :meth:`restart` is the only exit.
+                while not self._stop and not self._wake.is_set():
+                    self._wake.wait(timeout=5.0)
+                self._wake.clear()
+                continue
+            probe = self._probe()
+            if probe["alive"]:
+                self._report_alive(probe, reset_attempts=True)
                 self._wait_for_death()
             elif not self._settings.engine_binary:
                 # Probe-only: nothing to spawn or fix. An engine that stops
@@ -299,19 +476,30 @@ class EngineSupervisor:
                 with self._lock:
                     self.state = "offline"
                     self.attempts = 0
+                    self.phase, self.reason, self.detail = {}, None, None
+                    self.active, self.switching = None, None
                 self._wake.wait(timeout=2.0)
                 self._wake.clear()
             else:
                 self._bring_up()
 
-
     def _wait_for_death(self) -> None:
-        """Stay in ``available`` until the probe stops answering (crash) or the
-        operator nudges us."""
+        """Stay alive-reporting until the probe fails 3 CONSECUTIVE times
+        (mettle's Q5 recommendation: 2 s timeout, 2 s interval, dead after 3
+        consecutive connection errors/timeouts — a 503/404 is alive, just not
+        ready, and is NOT a failure), or the operator nudges us (restart/stop).
+        """
+        fails = 0
         while not self._stop and not self._wake.is_set():
-            time.sleep(2.0)
-            if not self._probing():
-                return
+            probe = self._probe()
+            if probe["alive"]:
+                fails = 0
+                self._report_alive(probe, reset_attempts=True)
+            else:
+                fails += 1
+                if fails >= 3:
+                    return
+            self._wake.wait(timeout=2.0)
         self._wake.clear()
 
     def _bring_up(self) -> None:
@@ -319,21 +507,51 @@ class EngineSupervisor:
         bounded restart budget on genuine crashes. ``failed`` is terminal for
         the loop until :meth:`restart` resets it.
 
-        While the spawned child is ALIVE and merely not answering yet, we keep
+        D1 fix: the 3-consecutive-probe-failure death declaration does NOT
+        prove the previous child died — it may be alive but hung/unresponsive.
+        Before ever spawning, we kill+reap whatever ``self._proc`` still is
+        (a no-op if it already exited on its own) and give the port a bounded
+        window to free, so a respawn can never overlap with a live, now-
+        untracked original (the exact orphan this supervisor exists to
+        prevent).
+
+        While the spawned child is ALIVE and merely not ready yet, we keep
         waiting without consuming the budget — a first run legitimately spends
-        minutes downloading GB-scale weights (mettle's own first-run download),
-        and respawning over it would double-book VRAM. An attempt is counted
-        only when the child DIES: it is reaped, we back off, and the next loop
-        pass spawns a fresh one."""
+        minutes downloading GB-scale weights, and respawning over it would
+        double-book VRAM. An attempt is counted only when the child DIES: it
+        is reaped, we back off, and the next loop pass spawns a fresh one.
+        mettled exit code 98 (§1.6, port held by a foreign engine) is final:
+        ``offline``, no respawn loop — another attempt would just collide
+        again.
+
+        Deadlock fix: the ``failed`` wait loop must NOT hold ``self._lock``
+        while it blocks on ``self._wake`` — :meth:`restart` (and :meth:`view`)
+        need that same lock for a brief, ordinary read/write, and a lock held
+        across an indefinite wait starves both forever. This was the deeper
+        half of the restart()-can't-leave-failed bug: even with ``restart()``
+        fixed to set ``_wake``, a lock held here would make ``restart()``'s own
+        ``with self._lock:`` block before it ever reaches ``_wake.set()``."""
+        self._refresh_settings()
         with self._lock:
-            if self.attempts >= len(self._BACKOFF_S):
-                self.state = "failed"
+            exhausted = self.attempts >= len(self._BACKOFF_S)
+            self.state = "failed" if exhausted else "starting"
+            if exhausted:
+                # Cleared under the same lock section as the state flip (not
+                # held across the wait below) so a restart() landing right
+                # around this transition is never silently swallowed.
                 self._wake.clear()
-                # Sleep until nudged; the loop must not spin in failed state.
-                while not self._stop and not self._wake.is_set():
-                    self._wake.wait(timeout=5.0)
-                return
-            self.state = "starting"
+        if exhausted:
+            # Sleep until nudged; the loop must not spin in failed state, and
+            # must not hold the lock while it waits (see docstring).
+            while not self._stop and not self._wake.is_set():
+                self._wake.wait(timeout=5.0)
+            return
+
+        died = self._reap_current()
+        if died is not None and died.returncode == 98:
+            self._offline_port_held()
+            return
+        self._wait_for_port_free()
 
         self.attempts += 1
         self._spawn()
@@ -342,42 +560,63 @@ class EngineSupervisor:
         # condition is already false) leaving a fresh mettled orphaned — the
         # exact VRAM-holding orphan this supervisor exists to prevent.
         if self._stop:
-            proc = self._proc
-            self._proc = None
-            self.pid = None
-            if proc is not None:
-                self._kill_group(proc)
+            self._reap_current()
             return
 
         # Probe until ready; stay patient while the child lives and keeps
         # starting up (weights download / model load), bail quickly on death.
         # Ceiling: a child that outlives engine_startup_window_s without ever
-        # answering is hung — kill the group (reaps), count the attempt,
+        # reaching 200 is hung — kill the group (reaps), count the attempt,
         # respawn on the next pass. The ceiling is long so a legitimate
         # first-run download is never misread as a hang.
         started = time.monotonic()
+        died_code: int | None = None
         while not self._stop:
-            if self._probing():
-                with self._lock:
-                    self.state = "available"
-                    self.attempts = 0
-                return
+            probe = self._probe()
+            if probe["alive"]:
+                if probe["code"] == 200:
+                    with self._lock:
+                        self.state = "available"
+                        self.attempts = 0
+                        self.phase = probe["body"].get("phase", {})
+                        self.reason = self.detail = None
+                        self.active = probe.get("active")
+                        self.switching = probe.get("switching")
+                    return
+                self._report_alive(probe, reset_attempts=False)
             proc = self._proc
             if proc is None or proc.poll() is not None:
-                break  # child died before answering → genuine attempt failure
-            if time.monotonic() - started > self._settings.engine_startup_window_s:
-                proc = self._proc
+                died_code = proc.poll() if proc is not None else None
                 self._proc = None
-                if proc is not None:
-                    self._kill_group(proc)
+                self.pid = None
+                break  # child died before answering -> genuine attempt failure
+            if time.monotonic() - started > self._settings.engine_startup_window_s:
+                reaped = self._reap_current()
+                died_code = reaped.returncode if reaped is not None else None
                 break
             time.sleep(0.5)
             if self._stop:
                 return
 
+        if died_code == 98:
+            self._offline_port_held()
+            return
+
         # Child dead (crash) or killed for hanging: back off, retry next pass.
         self._wake.wait(timeout=self._BACKOFF_S[min(self.attempts, len(self._BACKOFF_S)) - 1])
         self._wake.clear()
+
+    def _offline_port_held(self) -> None:
+        """mettled exit 98 (§1.6): a foreign engine holds the port. Sets the
+        ``_port_held`` flag, which :meth:`_loop` treats as terminal — ``offline``,
+        no respawn loop; the operator must free the port, point docket
+        elsewhere, or call :meth:`restart` once they have."""
+        with self._lock:
+            self.state = "offline"
+            self.reason = "port held by a foreign engine (mettled exit 98)"
+            self.phase, self.detail = {}, None
+            self.active, self.switching = None, None
+            self._port_held = True
 
 
 _SUPERVISOR: EngineSupervisor | None = None
@@ -385,9 +624,15 @@ _SUPERVISOR_LOCK = threading.Lock()
 
 
 def get_supervisor(settings: Settings | None = None) -> EngineSupervisor:
-    """The process-wide supervisor (one engine, one supervisor — CLAUDE.md)."""
+    """The process-wide supervisor (one engine, one supervisor — CLAUDE.md).
+    Constructed once with ``settings_fn=load_settings`` so every later
+    supervision cycle re-reads settings — a Settings-page change takes effect
+    on the next probe/spawn without a restart. ``settings`` seeds the FIRST
+    construction only (matching the previous contract); later calls with a
+    different ``settings`` no longer silently do nothing — the supervisor
+    already live-reloads on its own."""
     global _SUPERVISOR
     with _SUPERVISOR_LOCK:
         if _SUPERVISOR is None:
-            _SUPERVISOR = EngineSupervisor(settings or load_settings())
+            _SUPERVISOR = EngineSupervisor(settings or load_settings(), settings_fn=load_settings)
         return _SUPERVISOR
