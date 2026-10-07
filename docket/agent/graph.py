@@ -23,6 +23,14 @@ call, likewise one switch. A re-query hop switches back to retrieval for
 needs the LLM's refined query first, so that alternation is inherent, not a
 bug. Preserve this retrieve-then-chat order in any future edit here: it is
 what keeps phase switches minimal, not a separate mechanism.
+
+Each hop's answer call and its (possible) refine call are held under ONE
+``provider_phase(provider, Phase.CHAT)`` block -- not two separate per-call
+phase entries -- so a competing thread's retrieval request can't switch the
+engine away in the gap between them (D5 contention fix: per-call phase entry
+alone lets in-flight hit zero between two calls that are really one logical
+unit). ``iterative_retrieve`` runs OUTSIDE that block, in RETRIEVAL, the way
+it always has.
 """
 
 from __future__ import annotations
@@ -32,6 +40,7 @@ import re
 from dataclasses import dataclass, field
 
 from ..config import Settings, load_settings
+from ..phase import Phase, provider_phase
 from ..providers.base import Provider
 from ..report.schema import Citation
 from ..retrieval.retriever import Retriever
@@ -495,15 +504,23 @@ def answer(
         _emit(on_step, "context", hop=hop, context=context)
         messages = _grounded_messages(question, context, history=bounded_history)
         _emit(on_step, "prompt", hop=hop, messages=messages)
-        res = provider.chat(messages, temperature=0.0, max_tokens=700)
-        reliability, surprisal = reliability_score(res.logprobs or [])
-        _emit(on_step, "response", hop=hop, text=res.text, reliability=reliability)
         last_hop = hop == max_hops - 1
-        # Re-query only when the label is genuinely low AND we have a signal to
-        # trust; without logprobs the label is 'unknown' and re-querying is noise.
-        if reliability != "low" or last_hop or not res.logprobs:
+        # The answer call and its (possible) refine call are ONE logical
+        # chat operation -- held under a single CHAT block (D5 contention
+        # fix) so a competing retrieval request can't switch the engine away
+        # in the gap between them. iterative_retrieve runs OUTSIDE this
+        # block, below, in RETRIEVAL.
+        with provider_phase(provider, Phase.CHAT):
+            res = provider.chat(messages, temperature=0.0, max_tokens=700)
+            reliability, surprisal = reliability_score(res.logprobs or [])
+            _emit(on_step, "response", hop=hop, text=res.text, reliability=reliability)
+            # Re-query only when the label is genuinely low AND we have a signal
+            # to trust; without logprobs the label is 'unknown' and re-querying
+            # is noise.
+            need_refine = reliability == "low" and not last_hop and bool(res.logprobs)
+            nq = _refine_query(provider, question, context) if need_refine else None
+        if not need_refine:
             break
-        nq = _refine_query(provider, question, context)
         queries.append(nq)
         _emit(on_step, "refine", hop=hop, query=nq)
         hits = retriever.iterative_retrieve(queries, k=s.context_chunks)

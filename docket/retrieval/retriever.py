@@ -10,7 +10,17 @@ stays client-side is orchestration only:
 - **Iterative** — ``iterative_retrieve`` merges de-duplicated hits across
   several queries (the agent's re-queries; multi-hop needle recall).
 
-Every engine failure is loud — there is no local fallback to degrade to."""
+Every engine failure is loud — there is no local fallback to degrade to.
+
+Phase (residency contract D5, ``docket/phase.py``): both methods hold the
+engine's RETRIEVAL phase open across their WHOLE body via ``provider_phase``
+-- not just around each individual ``collection_search``/``rerank`` call --
+so a competing thread's chat request can't switch the engine away between
+one retrieve's search and its rerank, or between the several per-query
+retrieves inside ``iterative_retrieve``, forcing a switch-away-and-back that
+costs ~2 s each way for no reason. ``providers/router.py``'s per-call
+wrapping still runs underneath (same-thread reentrancy, free); this is a
+coarser hold on top, not a second mechanism."""
 
 from __future__ import annotations
 
@@ -19,6 +29,7 @@ from typing import Callable, Optional, Sequence
 
 from ..ingest.chunk import FILING_FIELDS
 from ..ingest.index import Corpus
+from ..phase import Phase, provider_phase
 
 log = logging.getLogger(__name__)
 
@@ -70,75 +81,78 @@ class Retriever:
         """
         if not self.lineage.chunks:
             return []
-        if self.scope_doc:
-            allowlist = [ch.chunk_id for ch in self.lineage.chunks if ch.doc_id == self.scope_doc]
-            if not allowlist:
-                # The scope resolved to zero chunks. An empty allowlist reads
-                # as "no scope" to the real provider (and FakeEngine, which
-                # mirrors it) — falling through would silently search the
-                # WHOLE collection instead of the (empty) requested scope.
+        with provider_phase(self.provider, Phase.RETRIEVAL):
+            if self.scope_doc:
+                allowlist = [ch.chunk_id for ch in self.lineage.chunks if ch.doc_id == self.scope_doc]
+                if not allowlist:
+                    # The scope resolved to zero chunks. An empty allowlist reads
+                    # as "no scope" to the real provider (and FakeEngine, which
+                    # mirrors it) — falling through would silently search the
+                    # WHOLE collection instead of the (empty) requested scope.
+                    return []
+            else:
+                allowlist = None
+            rows = self.provider.collection_search(
+                self.collection, query, mode=self.mode,
+                k=candidates if candidates is not None else self.candidates,
+                allowlist=allowlist,
+            )
+            # Drop orphans BEFORE rerank: cross-encoder time is the dominant
+            # cost (~0.5 ms/token on the reference card), never spend it on a
+            # hit we can't cite.
+            lineage = {row["document_id"]: self.lineage.find(row["document_id"]) for row in rows}
+            kept = [row for row in rows if lineage[row["document_id"]] is not None]
+            dropped = len(rows) - len(kept)
+            if dropped:
+                log.warning(
+                    "retrieve(%r): dropped %d engine hit(s) with no lineage row (orphaned chunk_id)",
+                    query, dropped,
+                )
+            rows = kept
+            if not rows:
                 return []
-        else:
-            allowlist = None
-        rows = self.provider.collection_search(
-            self.collection, query, mode=self.mode, k=candidates if candidates is not None else self.candidates,
-            allowlist=allowlist,
-        )
-        # Drop orphans BEFORE rerank: cross-encoder time is the dominant cost
-        # (~0.5 ms/token on the reference card), never spend it on a hit we
-        # can't cite.
-        lineage = {row["document_id"]: self.lineage.find(row["document_id"]) for row in rows}
-        kept = [row for row in rows if lineage[row["document_id"]] is not None]
-        dropped = len(rows) - len(kept)
-        if dropped:
-            log.warning(
-                "retrieve(%r): dropped %d engine hit(s) with no lineage row (orphaned chunk_id)",
-                query, dropped,
-            )
-        rows = kept
-        if not rows:
-            return []
 
-        # ``score`` must reflect the ranking that produced the final order: the
-        # engine's score when no reranker runs, or the cross-encoder's score
-        # once it reorders — otherwise a downstream read of ``score``
-        # misrepresents rerank's effect (score would contradict the order).
-        if self.reranker:
-            rr = self.reranker(query, [row["text"] for row in rows])
-            rows = [
-                dict(row, score=float(s))
-                for row, s in sorted(zip(rows, rr), key=lambda t: t[1], reverse=True)
-            ]
+            # ``score`` must reflect the ranking that produced the final order:
+            # the engine's score when no reranker runs, or the cross-encoder's
+            # score once it reorders — otherwise a downstream read of ``score``
+            # misrepresents rerank's effect (score would contradict the order).
+            if self.reranker:
+                rr = self.reranker(query, [row["text"] for row in rows])
+                rows = [
+                    dict(row, score=float(s))
+                    for row, s in sorted(zip(rows, rr), key=lambda t: t[1], reverse=True)
+                ]
 
-        hits = []
-        for row in rows[:k]:
-            lin = lineage[row["document_id"]]
-            hits.append(
-                {
-                    "chunk_id": row["document_id"],
-                    "doc_id": lin.doc_id,
-                    "engine_chunk_id": row["chunk_id"],
-                    "page": lin.page,
-                    "text": row["text"],
-                    "source": lin.source,
-                    **{f: getattr(lin, f) for f in FILING_FIELDS},
-                    "score": round(float(row["score"]), 6),
-                }
-            )
-        for rank, hit in enumerate(hits):
-            hit["rank"] = rank
-        return hits
+            hits = []
+            for row in rows[:k]:
+                lin = lineage[row["document_id"]]
+                hits.append(
+                    {
+                        "chunk_id": row["document_id"],
+                        "doc_id": lin.doc_id,
+                        "engine_chunk_id": row["chunk_id"],
+                        "page": lin.page,
+                        "text": row["text"],
+                        "source": lin.source,
+                        **{f: getattr(lin, f) for f in FILING_FIELDS},
+                        "score": round(float(row["score"]), 6),
+                    }
+                )
+            for rank, hit in enumerate(hits):
+                hit["rank"] = rank
+            return hits
 
     def iterative_retrieve(self, queries: Sequence[str], *, k: int = 10) -> list[dict]:
         """Merge de-duplicated hits across several queries (multi-hop recall).
 
         Best rank across queries wins; results are re-sorted by that rank. This
         is the retrieval half of the agent's iterative re-query loop (Q8)."""
-        best: dict[str, dict] = {}
-        for q in queries:
-            for hit in self.retrieve(q, k=k):
-                cur = best.get(hit["chunk_id"])
-                if cur is None or hit["rank"] < cur["rank"]:
-                    best[hit["chunk_id"]] = hit
-        merged = sorted(best.values(), key=lambda h: h["rank"])
-        return merged[:k]
+        with provider_phase(self.provider, Phase.RETRIEVAL):
+            best: dict[str, dict] = {}
+            for q in queries:
+                for hit in self.retrieve(q, k=k):
+                    cur = best.get(hit["chunk_id"])
+                    if cur is None or hit["rank"] < cur["rank"]:
+                        best[hit["chunk_id"]] = hit
+            merged = sorted(best.values(), key=lambda h: h["rank"])
+            return merged[:k]

@@ -1,8 +1,10 @@
 """Offline, deterministic tests for the engine phase coordinator (ticket D5):
 no switch while a request is in flight, CHAT preemption priority, switch
 timeout/rejection propagation, the empty-profile-names no-op, the lazy
-startup "already correct" check, and same-phase nested reentrancy not
-deadlocking.
+startup "already correct" check, same-phase nested reentrancy not
+deadlocking, cross-phase nested entry raising instead of deadlocking, the
+stale-cache-on-failed-switch fix, and that a switch/status probe never holds
+the lock across its (simulated) network I/O.
 
 No real engine, no network: ``switch_fn``/``status_fn`` are injected fakes
 (CLAUDE.md: tests stay offline & deterministic), mirroring how
@@ -17,7 +19,7 @@ import time
 import pytest
 
 from docket.config import Settings
-from docket.phase import Phase, PhaseCoordinator
+from docket.phase import Phase, PhaseCoordinator, PhaseDeadlockError
 
 
 def _settings(**kw) -> Settings:
@@ -248,3 +250,175 @@ def test_nested_same_phase_entry_does_not_deadlock_under_chat_pressure():
         chat_thread.join(timeout=5.0)
         assert not chat_thread.is_alive()
     assert calls == ["chat"]
+
+
+# -- cross-phase nested entry raises instead of deadlocking -----------------
+
+
+def test_entering_the_other_phase_while_holding_one_raises():
+    """The scenario fix #1 (the review's main point) explicitly calls out:
+    nesting a DIFFERENT phase on the same thread can never resolve (only
+    this same, now-blocked thread could ever drop its own in-flight count),
+    so it must fail loud instead of hanging."""
+    coord, _ = _coordinator(initial_active="retrieval")
+    with coord.enter(Phase.RETRIEVAL):
+        with pytest.raises(PhaseDeadlockError):
+            with coord.enter(Phase.CHAT):
+                pass  # pragma: no cover - never reached
+
+    # And the symmetric direction.
+    with coord.enter(Phase.CHAT):
+        with pytest.raises(PhaseDeadlockError):
+            with coord.enter(Phase.RETRIEVAL):
+                pass  # pragma: no cover - never reached
+
+
+# -- failed switch does not leave a stale cache ------------------------------
+
+
+def test_failed_switch_clears_cached_current():
+    status_calls = {"n": 0}
+
+    def status_fn(settings):
+        status_calls["n"] += 1
+        return "retrieval", False
+
+    attempts = {"n": 0}
+
+    def switch_fn(settings, target):
+        attempts["n"] += 1
+        raise RuntimeError("switch failed")
+
+    coord = PhaseCoordinator(_settings(), switch_fn=switch_fn, status_fn=status_fn)
+
+    # First entry resolves via the lazy status probe (current -> "retrieval").
+    with coord.enter(Phase.RETRIEVAL):
+        pass
+    assert status_calls["n"] == 1
+
+    # Entering CHAT must attempt a switch (current="retrieval" != "chat"),
+    # which fails.
+    with pytest.raises(RuntimeError):
+        with coord.enter(Phase.CHAT):
+            pass
+    assert attempts["n"] == 1
+    assert coord._current is None  # not left stale as "retrieval"
+
+    # The next entrant must re-probe rather than trust a cached value that
+    # might not reflect a half-finished switch.
+    with coord.enter(Phase.RETRIEVAL):
+        pass
+    assert status_calls["n"] == 2
+
+
+def test_failed_switch_notifies_waiters_so_they_dont_hang():
+    """A DIFFERENT thread blocked waiting for its own turn must wake up (and
+    be able to make progress) after someone else's switch attempt fails --
+    notify_all() has to fire on the failure path too, not just on success."""
+    status_calls = {"n": 0}
+
+    def status_fn(settings):
+        status_calls["n"] += 1
+        return "retrieval", False
+
+    def switch_fn(settings, target):
+        raise RuntimeError(f"switch to {target} failed")
+
+    coord = PhaseCoordinator(_settings(), switch_fn=switch_fn, status_fn=status_fn)
+
+    entered_retrieval = threading.Event()
+    release_retrieval = threading.Event()
+
+    def hold_retrieval():
+        with coord.enter(Phase.RETRIEVAL):
+            entered_retrieval.set()
+            release_retrieval.wait(timeout=5.0)
+
+    t_hold = threading.Thread(target=hold_retrieval, daemon=True)
+    t_hold.start()
+    assert entered_retrieval.wait(timeout=2.0)
+
+    chat_failed = threading.Event()
+    chat_error: dict = {}
+
+    def do_chat():
+        try:
+            with coord.enter(Phase.CHAT):
+                pass  # pragma: no cover - switch_fn always raises first
+        except RuntimeError as e:
+            chat_error["e"] = e
+        finally:
+            chat_failed.set()
+
+    t_chat = threading.Thread(target=do_chat, daemon=True)
+    t_chat.start()
+    time.sleep(0.2)  # chat registers as a waiter behind the held retrieval
+
+    retrieval_entered = threading.Event()
+
+    def new_retrieval():
+        with coord.enter(Phase.RETRIEVAL):
+            retrieval_entered.set()
+
+    t_r2 = threading.Thread(target=new_retrieval, daemon=True)
+    t_r2.start()
+    time.sleep(0.2)
+    assert not retrieval_entered.is_set()  # still behind chat's priority
+
+    release_retrieval.set()
+    t_hold.join(timeout=5.0)
+
+    assert chat_failed.wait(timeout=5.0)
+    assert isinstance(chat_error.get("e"), RuntimeError)
+    t_chat.join(timeout=5.0)
+
+    # The second retrieval entrant must NOT hang behind the failed switch --
+    # it wakes (notify fired on the failure path too), re-probes, and
+    # proceeds once the probe confirms "retrieval" is already current.
+    assert retrieval_entered.wait(timeout=5.0), "waiter hung after a failed switch (missing notify)"
+    t_r2.join(timeout=5.0)
+    assert status_calls["n"] >= 1
+
+
+# -- switch I/O never runs with the lock held --------------------------------
+
+
+def test_switch_io_runs_without_holding_the_lock():
+    """Fix #3: only a cooperative ``_switching`` flag (checked under brief
+    lock acquisitions) gates other entrants during a switch -- the real
+    ``threading.Lock`` must be free the whole time the (simulated) HTTP call
+    is stalled, so every other ``enter()``/``release()`` stays cheap instead
+    of queuing behind ~2 s of network I/O."""
+    io_started = threading.Event()
+    release_io = threading.Event()
+
+    def slow_switch(settings, target):
+        io_started.set()
+        release_io.wait(timeout=5.0)
+
+    coord = PhaseCoordinator(
+        _settings(), switch_fn=slow_switch, status_fn=lambda s: ("retrieval", False)
+    )
+    # Seed `_current` via the lazy probe first so the next enter() goes
+    # straight into a real switch attempt (not the startup-probe branch).
+    with coord.enter(Phase.RETRIEVAL):
+        pass
+
+    def do_chat():
+        with coord.enter(Phase.CHAT):
+            pass
+
+    t = threading.Thread(target=do_chat, daemon=True)
+    t.start()
+    assert io_started.wait(timeout=2.0)
+
+    # The switch's "network call" is stalled right now (holding io_started,
+    # not yet released). The coordinator's own lock must be acquirable.
+    got_lock = coord._lock.acquire(blocking=False)
+    if got_lock:
+        coord._lock.release()
+
+    release_io.set()
+    t.join(timeout=5.0)
+
+    assert got_lock, "the lock was held across the switch's I/O call"

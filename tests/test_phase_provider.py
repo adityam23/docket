@@ -13,6 +13,8 @@ stay offline & deterministic.
 
 from __future__ import annotations
 
+import threading
+import time
 from contextlib import contextmanager
 
 from docket.agent.graph import answer
@@ -162,3 +164,64 @@ def test_requery_hop_switches_retrieval_chat_retrieval_chat():
 
     assert calls == ["chat", "retrieval", "chat"]
     assert len(result.queries) == 2  # the original question + one refined re-query
+
+
+def test_contention_ingest_thread_does_not_cause_extra_switches():
+    """The review's headline fix: per-call phase entry alone lets in-flight
+    hit zero BETWEEN two calls that are really one logical operation (the
+    hop's answer+refine chat pair; retrieve's search+rerank pair), so a
+    contending thread can switch the engine away and back for nothing. With
+    ``Retriever.retrieve``/``iterative_retrieve`` and the agent's per-hop
+    chat block each holding their phase open (docket/phase.py same-thread
+    reentrancy), a concurrently running "ingest" loop must not add any extra
+    switches around a QA ask that refines once: retrieval -> chat (answer +
+    refine, ONE held block, no flip between them) -> retrieval -> chat."""
+    coord, calls = _real_coordinator()
+
+    ingest_chunks = acme_chunks()
+    ingest_corpus = Corpus()
+    ingest_corpus.add(ingest_chunks)
+    ingest_provider = PhasedProvider(FakeEngine(ingest_chunks, rank="all"), coord)
+    ingest_retriever = Retriever(
+        ingest_provider, ingest_corpus, collection="docket", mode="hybrid"
+    )
+
+    stop = threading.Event()
+
+    def ingest_loop():
+        while not stop.is_set():
+            ingest_retriever.retrieve("ingest query", k=5)
+            time.sleep(0.005)
+
+    t = threading.Thread(target=ingest_loop, daemon=True)
+    t.start()
+    time.sleep(0.05)  # let ingest run a few iterations before the ask lands
+
+    retriever, provider = _retriever_and_provider(
+        {"rank": "all", "text": "Revenue was $10M [1].", "logprobs": [-2.0, -2.0, -2.0]}, coord
+    )
+    settings = Settings(
+        engine_retrieval_profile="retrieval", engine_chat_profile="chat", max_hops=2
+    )
+
+    try:
+        result = answer(
+            "What was revenue?", retriever=retriever, provider=provider, settings=settings
+        )
+    finally:
+        stop.set()
+        t.join(timeout=5.0)
+
+    # Deterministic prefix regardless of ingest's timing: one switch into
+    # chat for the WHOLE answer+refine block (no "retrieval" sneaks in
+    # between those two chat calls -- the bug this fix closes), one switch
+    # back to retrieval for iterative_retrieve, one switch back to chat for
+    # hop 1. Once current == a phase, any number of concurrent same-phase
+    # entrants (ingest included) never add another switch_fn call -- that
+    # invariant is what bounds this, not luck. Ingest resuming in retrieval
+    # after the ask fully releases (if it wins the race before this
+    # assertion runs) is correct "ask preempts, then ingest resumes"
+    # behaviour, not thrash, so at most one trailing entry is allowed.
+    assert calls[:3] == ["chat", "retrieval", "chat"]
+    assert len(calls) <= 4
+    assert len(result.queries) == 2

@@ -38,6 +38,18 @@ class PhasedProvider:
     def __getattr__(self, key):
         return getattr(self._inner, key)
 
+    def phase(self, phase: Phase):
+        """Hold ``phase`` open across SEVERAL engine calls instead of paying
+        a switch between each one (D5 contention fix): a thread already
+        holding a phase open re-enters it for free (same-thread reentrancy,
+        see ``docket/phase.py``), so e.g. ``Retriever.retrieve``'s search+
+        rerank pair, or the agent's per-hop chat-answer+refine pair, becomes
+        ONE held block instead of releasing and re-acquiring (and risking a
+        competing thread's phase winning the gap) between the two calls.
+        Call via ``docket.phase.provider_phase(provider, phase)``, which
+        no-ops for a provider that doesn't implement this (test doubles)."""
+        return self._coordinator.enter(phase)
+
     def health(self) -> dict:
         return self._inner.health()
 
