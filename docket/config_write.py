@@ -25,6 +25,7 @@ from enum import Enum
 
 from pydantic import ValidationError
 
+from .atomic_write import atomic_write_text
 from .config import _ENV_LOCAL_FILE, Settings, load_settings
 
 # Non-secret runtime settings the Settings page may change. Names are the
@@ -148,32 +149,18 @@ def _read_env_local() -> dict[str, str]:
 
 def _write_env_local(env: dict[str, str]) -> None:
     """Atomically rewrite ``.env.local`` from ``env`` (raw logical values —
-    quoting happens here, the one place that applies it) with 0600 perms.
-
-    Written to a sibling temp file then ``os.replace``d in, so a crash mid-write
-    never leaves a half-written secrets file. Created 0600 from the start (never
-    a window where the key is world-readable).
+    quoting happens here, the one place that applies it) with 0600 perms, via
+    the shared ``atomic_write_text`` (a sibling temp file + ``os.replace``, so
+    a crash mid-write never leaves a half-written secrets file, and it is
+    created 0600 from the start — never a window where the key is
+    world-readable).
     """
-    import os
-    import tempfile
-
     body = (
         "# Machine-local overrides written by the dashboard (Settings + API keys).\n"
         "# Layers over .env; gitignored; do not commit. Edit via the app.\n"
         + "".join(f"{k}={_quote_env_value(v)}\n" for k, v in sorted(env.items()))
     )
-    d = os.path.dirname(_ENV_LOCAL_FILE) or "."
-    os.makedirs(d, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=d, prefix=".env.local.", suffix=".tmp")
-    try:
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(body)
-        os.replace(tmp, _ENV_LOCAL_FILE)
-    except BaseException:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
-        raise
+    atomic_write_text(_ENV_LOCAL_FILE, body, mode=0o600)
 
 
 def update_config(updates: dict[str, object]) -> None:

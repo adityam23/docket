@@ -47,7 +47,7 @@ from ..ingest.samples import load_samples
 from ..report.render import reliability_banner
 from ..service import ask_traced as ask_traced_service
 from ..service import chat_store, health as health_service
-from ..service import remove_document
+from ..service import no_such_chat, remove_document
 from ..service import trace_store
 from .jobs import JOBS, sweep_stale_uploads
 from .observability import capacity_stats, config_view, corpus_stats
@@ -204,24 +204,28 @@ class EngineProfileRequest(BaseModel):
 def _answer_payload(question: str, *, session_id: str | None = None, on_step=None) -> tuple[dict, dict]:
     """Run the agent (persisting a trace) and shape the answer payload.
 
-    Returns ``(payload, trace)``. The hit projection is shared with the trace via
-    ``hit_view`` (one shape — CLAUDE.md). Used by ``/ask`` (back-compat),
+    Returns ``(payload, trace)``. Built straight from the persisted trace dict
+    (the one place ``surprisal``/``citations``/``queries``/``hops``/``detail``/
+    ``elapsed_ms`` are derived — ``TraceCollector.build``) plus the reliability
+    banner and the hit projection (``hit_view`` — shared with the trace steps,
+    one shape, CLAUDE.md); ``hits`` itself isn't part of the trace record, so
+    it still comes from the live ``Answer``. Used by ``/ask`` (back-compat),
     ``/api/ask``, and the SSE stream (which passes a live ``on_step`` sink).
     With ``session_id`` the ask runs inside a Chat: prior turns are threaded as
     model context and the trace nests under the chat (T21).
     """
     result, trace = ask_traced_service(question, on_step=on_step, session_id=session_id)
     payload = {
-        "question": result.question,
-        "answer": result.answer,
-        "reliability": result.reliability,
-        "banner": reliability_banner(result.reliability),
+        "question": trace["question"],
+        "answer": trace["answer"],
+        "reliability": trace["reliability"],
+        "banner": reliability_banner(trace["reliability"]),
         "surprisal": trace["surprisal"],
-        "detail": result.detail,  # aggregation breakdown (op/result/unit/per-item) or None
-        "citations": [c.model_dump() for c in result.citations],
+        "detail": trace["detail"],  # aggregation breakdown (op/result/unit/per-item) or None
+        "citations": trace["citations"],
         "hits": [hit_view(h) for h in (result.hits or [])],
-        "queries": result.queries or [question],
-        "hops": len(result.queries or [question]),
+        "queries": trace["queries"],
+        "hops": trace["hops"],
         "elapsed_ms": trace["elapsed_ms"],
         "trace_id": trace["id"],
         "chat_id": trace.get("chat_id"),
@@ -319,7 +323,7 @@ def api_overview() -> dict:
 def _require_session(session_id: str) -> None:
     """404 early for an unknown Chat session (before any inference starts)."""
     if session_id and chat_store().get(session_id) is None:
-        raise HTTPException(status_code=404, detail=f"no such chat session: {session_id}")
+        raise HTTPException(status_code=404, detail=no_such_chat(session_id))
 
 
 @app.post("/api/ask")
@@ -410,14 +414,9 @@ class ChatCreate(BaseModel):
 @app.post("/api/chats")
 def api_chat_create(req: ChatCreate) -> dict:
     """Mint a new (empty) Chat session. The Ask surface calls this lazily before
-    its first question; later questions thread their turns into it server-side."""
-    from ..agent.trace import _utc_now
-
-    store = chat_store()
-    now = _utc_now()
-    chat_id = store.next_id(now)
-    # Untitled until its first turn names it (the first question).
-    return store.create(chat_id, req.title or "", now=now)
+    its first question; later questions thread their turns into it server-side.
+    Untitled until its first turn names it (the first question)."""
+    return chat_store().new(req.title or "")
 
 
 @app.get("/api/chats/{chat_id}")
@@ -425,7 +424,7 @@ def api_chat(chat_id: str) -> dict:
     """One Chat with its ordered turn summaries."""
     chat = chat_store().get(chat_id)
     if chat is None:
-        raise HTTPException(status_code=404, detail=f"no such chat session: {chat_id}")
+        raise HTTPException(status_code=404, detail=no_such_chat(chat_id))
     return chat
 
 
@@ -434,7 +433,7 @@ def api_chat_delete(chat_id: str) -> dict:
     """Remove a Chat and cascade-delete every turn's trace, so a deleted chat
     leaves nothing behind (its turns would otherwise resurface as one-shots)."""
     if not chat_store().delete(chat_id):
-        raise HTTPException(status_code=404, detail=f"no such chat session: {chat_id}")
+        raise HTTPException(status_code=404, detail=no_such_chat(chat_id))
     removed = trace_store().delete_by_chat(chat_id)
     return {"deleted": chat_id, "traces_removed": removed}
 

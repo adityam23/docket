@@ -21,6 +21,30 @@ def _client() -> TestClient:
     return TestClient(webapp.app, base_url="http://127.0.0.1")
 
 
+def _fake_trace(fake: Answer, trace_id: str, *, elapsed_ms: int = 5, **extra) -> dict:
+    """A trace dict shaped like the real ``TraceCollector.build`` output, for
+    stubbing ``ask_traced_service`` — ``_answer_payload`` (app.py) now builds
+    the response straight from the trace dict, so a minimal fake missing a
+    field (e.g. just ``{"id", "surprisal", "elapsed_ms"}``) would KeyError."""
+    out = {
+        "id": trace_id,
+        "question": fake.question,
+        "answer": fake.answer,
+        "reliability": fake.reliability,
+        "surprisal": None if fake.surprisal != fake.surprisal else fake.surprisal,
+        "detail": fake.detail,
+        "citations": [c.model_dump() for c in fake.citations],
+        "queries": fake.queries or [fake.question],
+        "hops": len(fake.queries or [fake.question]),
+        "elapsed_ms": elapsed_ms,
+        "steps": [],
+        "chat_id": None,
+        "turn_index": None,
+    }
+    out.update(extra)
+    return out
+
+
 def test_ask_endpoint(monkeypatch):
     fake = Answer(
         question="What was revenue?",
@@ -30,7 +54,7 @@ def test_ask_endpoint(monkeypatch):
         citations=[Citation(doc_id="acme-10k", page=1, quote="Total revenue ...")],
         hits=[{"doc_id": "acme-10k"}],
     )
-    trace = {"id": "trace-x", "surprisal": 0.03, "elapsed_ms": 5, "steps": [], "chat_id": None}
+    trace = _fake_trace(fake, "trace-x", surprisal=0.03)
     monkeypatch.setattr(
         webapp, "ask_traced_service", lambda q, on_step=None, session_id=None: (fake, trace)
     )
@@ -307,7 +331,7 @@ def test_ask_stream_emits_steps_and_done(monkeypatch):
     from docket.agent.graph import Answer
 
     fake = Answer(question="q", answer="A [1].", reliability="high", surprisal=0.02)
-    trace = {"id": "trace-z", "surprisal": 0.02, "elapsed_ms": 3, "steps": []}
+    trace = _fake_trace(fake, "trace-z", elapsed_ms=3)
 
     def fake_traced(q, on_step=None, session_id=None):
         if on_step:
@@ -361,7 +385,7 @@ def test_ask_with_session_threads_and_returns_chat_id(monkeypatch):
     captured = {}
 
     fake = Answer(question="And vs last year?", answer="It grew [1].", reliability="high", surprisal=0.02)
-    trace = {"id": "trace-t21", "surprisal": 0.02, "elapsed_ms": 4, "chat_id": "chat-1", "turn_index": 1}
+    trace = _fake_trace(fake, "trace-t21", elapsed_ms=4, chat_id="chat-1", turn_index=1)
 
     def fake_traced(q, on_step=None, session_id=None):
         captured["q"] = q
@@ -395,7 +419,7 @@ def test_ask_unknown_session_is_404(monkeypatch):
 def test_stream_passes_session_to_service(monkeypatch):
     captured = {}
     fake = Answer(question="q", answer="A [1].", reliability="high", surprisal=0.02)
-    trace = {"id": "trace-s9", "surprisal": 0.02, "elapsed_ms": 3, "steps": [], "chat_id": "c9"}
+    trace = _fake_trace(fake, "trace-s9", elapsed_ms=3, chat_id="c9")
 
     def fake_traced(q, on_step=None, session_id=None):
         captured["session_id"] = session_id
@@ -521,11 +545,8 @@ def test_absent_origin_and_sec_fetch_site_passes(monkeypatch):
 
 def test_chat_create_endpoint(monkeypatch):
     class _Store:
-        def next_id(self, now):
-            return "chat-new-1"
-
-        def create(self, chat_id, title, now=None):
-            return {"id": chat_id, "title": title, "created_at": now, "updated_at": now, "turns": []}
+        def new(self, title):
+            return {"id": "chat-new-1", "title": title, "created_at": "x", "updated_at": "x", "turns": []}
 
     monkeypatch.setattr(webapp, "chat_store", lambda: _Store())
     client = _client()

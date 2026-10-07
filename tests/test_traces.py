@@ -90,6 +90,73 @@ def test_trace_store_delete_and_cascade(tmp_path):
     assert [t["id"] for t in store.list()] == []
 
 
+def test_ids_unique_at_cap_within_same_second():
+    """B6: the id's suffix used to be `len(records) + 1` — pinned at `cap + 1`
+    once the ring buffer filled (next id was always "count+1"), and two ids
+    minted within the same one-second timestamp resolution collided outright.
+    Minting many ids from the SAME created_at (a frozen/same-second clock)
+    must still produce unique ids, with no disk access needed to do it."""
+    store = TraceStore("/does/not/exist", cap=5)
+    created_at = "2026-08-21T10:00:00+00:00"
+    ids = [store.next_id(created_at) for _ in range(50)]
+    assert len(set(ids)) == 50
+    assert all(i.startswith("trace-") for i in ids)  # existing prefix format kept
+
+
+def test_trace_store_get_delete_correct_after_cap_with_same_timestamp(tmp_path):
+    """Regression for the id-collision bug end to end: fill past the cap with
+    records minted from the identical timestamp, then confirm get/delete each
+    resolve to exactly the record asked for — never "the wrong one"."""
+    store = TraceStore(str(tmp_path), cap=5)
+    created_at = "2026-08-21T10:00:00+00:00"
+    ids = [store.next_id(created_at) for _ in range(10)]
+    for i, tid in enumerate(ids):
+        store.append({"id": tid, "question": f"q{i}", "created_at": created_at})
+
+    kept_ids = [t["id"] for t in store.list()]
+    assert len(kept_ids) == 5
+    for tid in kept_ids:
+        assert store.get(tid)["id"] == tid   # resolves to itself, not a collided sibling
+
+    victim = kept_ids[0]
+    assert store.delete(victim) is True
+    assert store.get(victim) is None
+    assert len(store.list()) == 4             # only the one victim removed
+
+
+def test_trace_store_concurrent_appends_no_loss_or_raise(tmp_path):
+    """B6 race: `_write_jsonl` used to write a FIXED `path + ".tmp"`, so two
+    concurrent appends (two tabs, or the SSE stream racing the POST fallback —
+    FastAPI runs sync endpoints concurrently in a threadpool) could both
+    truncate the same tmp file and have the loser's `os.replace` raise
+    `FileNotFoundError`, or silently lose one writer's record. Every one of N
+    concurrent appends must land, and none may raise."""
+    import threading
+
+    store = TraceStore(str(tmp_path), cap=200)
+    n = 40
+    errors: list[BaseException] = []
+
+    def worker(i: int) -> None:
+        try:
+            store.append(
+                {"id": store.next_id("2026-08-21T10:00:00+00:00"), "question": f"q{i}", "created_at": "x"}
+            )
+        except BaseException as e:  # noqa: BLE001 - captured, not raised, from a thread
+            errors.append(e)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert errors == []
+    listed = store.list()
+    assert len(listed) == n                      # none lost to a lost-update race
+    assert len({t["id"] for t in listed}) == n   # and none collided either
+
+
 def test_collector_build_record():
     from docket.report.schema import Citation
 
@@ -267,3 +334,28 @@ def test_ask_traced_without_session_unchanged(tmp_path, monkeypatch):
         raise AssertionError("expected ValueError for unknown session")
     except ValueError:
         pass
+
+
+def test_chat_store_new_mints_id_and_equal_timestamps(monkeypatch, tmp_path):
+    """B6: ``create`` used to default ``now`` via two SEPARATE ``_utc_now()``
+    calls (one for created_at, one for updated_at) when the caller (the old
+    ``/api/chats`` route) didn't pass one — they could disagree by whatever
+    elapsed between the calls. ``ChatStore.new`` mints the id and both
+    timestamps from exactly one clock read."""
+    import docket.agent.trace as trace_mod
+
+    calls = {"n": 0}
+
+    def fake_now() -> str:
+        calls["n"] += 1
+        return f"2026-08-21T10:00:0{calls['n']}+00:00"  # a DIFFERENT value per call
+
+    monkeypatch.setattr(trace_mod, "_utc_now", fake_now)
+    store = trace_mod.ChatStore(str(tmp_path))
+    chat = store.new("hello")
+
+    assert calls["n"] == 1                               # exactly one clock read
+    assert chat["created_at"] == chat["updated_at"]       # so they can't disagree
+    assert chat["title"] == "hello" and chat["turns"] == []
+    assert chat["id"].startswith("chat-")                 # existing prefix format kept
+    assert store.get(chat["id"]) == chat                  # minted AND persisted

@@ -146,6 +146,13 @@ def chat_store(settings: Settings | None = None) -> ChatStore:
     return ChatStore(s.index_dir)
 
 
+def no_such_chat(session_id: str) -> str:
+    """The one "unknown chat session" message (B6) — used by this module's own
+    ``ValueError`` below and reused by the web layer's 404s so the wording
+    never drifts between the two call sites."""
+    return f"no such chat session: {session_id}"
+
+
 def session_history(
     session_id: str,
     *,
@@ -165,7 +172,7 @@ def session_history(
     traces = traces if traces is not None else trace_store(settings)
     chat = chats.get(session_id)
     if chat is None:
-        raise ValueError(f"no such chat session: {session_id}")
+        raise ValueError(no_such_chat(session_id))
     out: list[dict] = []
     for turn in chat.get("turns", []):
         t = traces.get(turn.get("trace_id") or "")
@@ -200,11 +207,12 @@ def ask_traced(
     """
     s = settings or load_settings()
     store = trace_store(s)
+    chats = chat_store(s)  # one instance for the whole call (B6) — not re-built per use
     collector = TraceCollector(question)
 
     history: list[dict] = []
     if session_id:
-        history = session_history(session_id, settings=s, chats=chat_store(s), traces=store)
+        history = session_history(session_id, settings=s, chats=chats, traces=store)
 
     def sink(kind: str, info: dict) -> None:
         collector(kind, info)
@@ -218,7 +226,7 @@ def ask_traced(
     chat_id = session_id
     turn_index = None
     if session_id:
-        chat = chat_store(s).get(session_id)
+        chat = chats.get(session_id)
         turn_index = len(chat["turns"]) if chat else 0
 
     trace = collector.build(
@@ -231,7 +239,7 @@ def ask_traced(
     store.append(trace)
 
     if session_id:
-        chat_store(s).append_turn(
+        chats.append_turn(
             session_id,
             {
                 "trace_id": trace["id"],
