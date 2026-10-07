@@ -2,9 +2,9 @@
 """Run the FinanceBench GENERATOR smoke test against one candidate, or compare
 several saved scorecards.
 
-The candidate only has to speak the OpenAI ``/v1`` contract, so a local
-``llama-server -m model.gguf --port 8971`` is a drop-in target — we reuse the
-production :class:`OpenAICompatProvider`, no candidate-specific inference code.
+The candidate only has to speak the OpenAI ``/v1`` contract, so any reachable
+mettle endpoint is a drop-in target — we reuse the production
+:class:`OpenAICompatProvider`, no candidate-specific inference code.
 
     # score one reachable candidate and save its card
     uv run python benchmarks/financebench/run.py \

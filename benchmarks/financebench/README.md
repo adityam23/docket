@@ -23,6 +23,17 @@ Result (2026-08-22, Q4_K_M, RTX 3060): **Qwen3.5-4B Claude-Opus-distill 94% (32/
 ≫ Gemma-4 E2B 56% (cites only 14/29) ≈ Qwen3.5-2B base 53%. Chosen base:
 **Qwen3.5-4B Claude-Opus-Reasoning-distill** (SAE/lab-mode deferred — see decisions).
 
+**Scoring fix disclosure (2026-10-07).** `docket/eval/financebench.py`'s magnitude-suffix
+matcher (`_numbers`) had a word-boundary bug: a trailing word's first letter could be
+misread as a `k`/`m`/`b`/`t` magnitude suffix with no boundary check (e.g. `"5 thousand"`
+→ 5e12 instead of 5000, `"12 months"` → 1.2e7 instead of 12). Provider error strings
+(`"[error: ...]"`) could also be numerically matched against a gold by accident (a stray
+digit, a port number, or an HTTP status code landing inside the ×1000-tolerant matcher's
+band). Both are fixed and regression-tested. This can shift `run.py`'s smoke-gate numbers
+(and `run_full.py`'s numeric-match results) slightly versus earlier runs that hit either
+bug — disclosed here, not hidden; no number already recorded under `results/` has been
+retroactively edited, only future runs use the corrected scorer.
+
 ## 2. Real FinanceBench (the actual benchmark) — Claude-judged
 
 `run_full.py` loads the real 150-Q open subset (`PatronusAI/financebench`,
@@ -61,6 +72,19 @@ Generator quality gap **+25.4 pt** (oracle); full-RAG gap **+28.0 pt**; retrieva
 (oracle→RAG) qwen −12.7 / gemma −15.3 pt. Anchor: the paper's shared-vault retrieval
 setting is ~19%; oracle is the upper-bound reference. Pre-fix figures (86/61.3/73.3/46.7)
 were inflated 5–7 pt and are superseded.
+
+**Router disclosure (2026-10-07).** The 80.7%/68.0% figures above (and the 82.0%
+full-RAG@10 figure in §5) were measured on the *direct* grounded-prompt path
+(`agent.graph._grounded_messages` called straight from the harness) — not the production
+`agent.graph.answer()` path, which also runs the aggregate router (`plan_operation`) for
+cross-document questions. ORACLE-evidence mode stays on the direct path by design (it
+deliberately isolates the generator from the router). Full-RAG no longer does: `run_full.py
+--rag`/`--contexts` now route every question through the real `answer()` call, batched
+two-pass (`PrefetchedRetriever`/`run_rag_via_answer` in `docket/eval/financebench.py`) so a
+phase-switching engine (docket/phase.py) pays the retrieval↔chat profile switch once for the
+whole run, not once per question. A re-run through the router is pending a live mettle
+session — until then, treat 80.7%/68.0%/82.0% as the pre-router ceiling, not the deployed
+number; no new number is claimed here.
 
 ### Filings (needed for full-RAG / the sweep)
 
@@ -141,10 +165,16 @@ full-RAG (context = live retrieval instead of gold evidence), Claude-judged as i
 ```bash
 uv run python benchmarks/financebench/run_full.py \
     --base-url <candidate-/v1> --model <id> --rag --gap \
-    --docs-dir benchmarks/financebench/filings \
-    --embed-model embed-gemma:latest --rerank-model qwen3-reranker-0.6b:latest \
+    --docs-dir benchmarks/financebench/filings --collection financebench \
+    --rerank-model qwen3-reranker-0.6b:latest \
     --retrieval-k 10 --export results/responses/rag_<name>.jsonl     # shipped k
 ```
+
+`--collection` (default `financebench`) is a dedicated engine collection for the
+benchmark run — never the production `docket` collection; the embedder is the
+collection's engine-side default (`embed-gemma` per the Phase-A result above), not a
+docket flag — `embed_model` in docket's own config only affects `dk embed`, unrelated
+to engine-side collection search.
 
 **Phase-B result (2026-08-25, distill, winner retriever):** k=10 ships.
 `context_chunks=10` scores **82.0% (123/150)** full-RAG vs 68.0% at k=6 (+14 pt).

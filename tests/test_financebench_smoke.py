@@ -28,6 +28,16 @@ def test_number_parsing_normalises_magnitudes():
     assert _numbers("no digits here") == []
 
 
+def test_number_parsing_does_not_misread_a_trailing_word_as_a_magnitude_suffix():
+    # Regression: the old suffix regex was an alternation tried in LISTED
+    # order and accepted the first branch that matched a *prefix* -- so
+    # "thousand"/"total"/"months" were silently swallowed by the "t"/"m"
+    # single-letter branches tried earlier.
+    assert _numbers("5 thousand") == [5000.0]          # correctly scaled, not 5e12
+    assert _numbers("1,577 total") == [1577.0]         # "total" is not "trillion"
+    assert _numbers("12 months") == [12.0]             # "months" is not "million"
+
+
 def test_match_value_tolerance():
     assert _match_value("about $4.82 billion", 4820000000, tol=0.005)
     assert _match_value("17.3%", 17.27, tol=0.06)
@@ -47,6 +57,17 @@ def test_score_item_value_and_refuse():
     assert refused.ok and not refused.hallucinated
     leaked = score_item(refuse_item, "Headcount was 5,000 employees.", 10)
     assert not leaked.ok and leaked.hallucinated  # answered when it should refuse
+
+
+def test_score_item_never_numerically_scores_a_provider_error():
+    # Regression: an "[error: ...]" string can accidentally numeric-match a
+    # gold (a status code, a port number, ...) under the tolerant matcher --
+    # it must always score as an error, never as a (correct or hallucinated)
+    # answer.
+    value_item = {"id": "v", "kind": "value", "gold": {"value": 500, "tol": 0.5}}
+    r = score_item(value_item, "[error: HTTP 500 from http://host:500/v1/chat]", 10)
+    assert not r.ok and not r.hallucinated and not r.answered
+    assert "error" in r.reason
 
 
 def _oracle_answer(item: dict) -> str:
@@ -110,6 +131,15 @@ def test_score_financebench_numeric_first():
     assert good.ok and good.reason == "numeric match"
     bad = score_financebench(it, "It was $2,000 million [1].")
     assert not bad.ok and bad.hallucinated
+
+
+def test_score_financebench_never_numerically_scores_a_provider_error():
+    # The gold is "$1577.00" -- embed that figure in an error string to prove
+    # it would otherwise have numeric-matched under the ×1000-tolerant
+    # matcher (the exact regression this guards against).
+    it = fb_to_item(_FB_RECORD)
+    r = score_financebench(it, "[error: connection reset after 1577ms]")
+    assert not r.ok and not r.hallucinated and not r.answered
 
 
 def test_score_financebench_judge_fallback_for_qualitative():

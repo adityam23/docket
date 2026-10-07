@@ -48,7 +48,7 @@ def test_dump_contexts_resumes_without_re_retrieving(tmp_path):
         called.append(item["id"])
         return [{"doc_id": "D", "page": 2, "text": "x"}]
 
-    run_full._dump_contexts(items, retrieve, str(p), base_url="http://unused")
+    run_full._dump_contexts(items, retrieve, str(p))
     # q1 already dumped → only q2 is retrieved on resume
     assert called == ["q2"]
     rows = [json.loads(l) for l in p.read_text().splitlines() if l.strip()]
@@ -70,7 +70,7 @@ def test_resilient_provider_delegates_and_retries():
             return "ok"
 
     inner = _Flaky()
-    wrapped = run_full._ResilientProvider(inner, base_url="http://127.0.0.1:11434/v1")
+    wrapped = run_full._ResilientProvider(inner)
     assert wrapped.name == "flaky"  # transparent delegation of non-chat attrs
 
     # _resilient backs off between tries; patch sleep so no wall time is spent.
@@ -84,3 +84,21 @@ def test_resilient_provider_delegates_and_retries():
     finally:
         _time.sleep = orig_sleep
     assert inner.calls == 2
+
+
+def test_export_responses_resume_drops_torn_line_without_crashing(tmp_path):
+    # Regression: the old resume logic re-read the output file a SECOND time
+    # (to build `good`) with no torn-line guard, so a torn last line raised
+    # instead of being dropped as the surrounding comment claimed. An error
+    # row must also be dropped (retried), never kept.
+    p = tmp_path / "out.jsonl"
+    p.write_text(
+        json.dumps({"id": "a", "response": "ok answer"}) + "\n"
+        + json.dumps({"id": "b", "response": "[error: boom]"}) + "\n"
+        + '{"id": "c", "response": "unterm'  # torn last line, no trailing newline
+    )
+    # items=[] -> todo is empty -> only the resume/rewrite path runs; provider
+    # is never touched.
+    run_full._export_responses(None, [], str(p), "oracle-evidence", max_tokens=10)
+    rows = [json.loads(l) for l in p.read_text().splitlines() if l.strip()]
+    assert {r["id"] for r in rows} == {"a"}

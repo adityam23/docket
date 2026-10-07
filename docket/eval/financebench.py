@@ -26,32 +26,80 @@ import re
 import time
 from dataclasses import dataclass, field
 
-from ..agent.graph import _SYSTEM, _format_context, _grounded_messages
+from ..agent.graph import REFUSAL, _format_context, _grounded_messages
+from ..agent.graph import answer as graph_answer
+from ..agent.graph import plan_operation
+from ..config import Settings
 from ..providers.base import Provider
 
 # Substring of the system-prompt refusal sentinel ("The documents do not contain
 # this.") — matched loosely so paraphrases still count as a refusal.
 _REFUSAL = "do not contain"
 
+# The ``"[error: ...]"`` marker ``generate_financebench``/``generate_via_answer``
+# emit when the provider call itself raised (transport failure, HTTP error,
+# SlotUnavailable, ...). Must never reach the numeric/judge scorers below: its
+# text is an exception message (a URL, a status code, a stray digit) that can
+# accidentally numeric-match a gold under the ×1000-tolerant matcher -- which
+# would silently credit a request that never even reached the model.
+_ERROR_PREFIX = "[error"
+
+
+def _is_error_response(text: str) -> bool:
+    return text.strip().lower().startswith(_ERROR_PREFIX)
+
+
 # Magnitude words / suffixes → multiplier, so "$3.2 billion", "3.2B" and
 # "3,200 million" all normalise to the same value for comparison.
+#
+# NOT unified with ``agent.tools.parse_number``'s ``_MULT`` table even though
+# both now use the identical word-boundary-anchored matching approach (see
+# below): ``parse_number`` is the production extraction path (model-extracted
+# values for ``aggregate()``/``compute_metric``) and deliberately recognises
+# only k/m/b-family suffixes; this scorer additionally has to recognise
+# trillion/kk/tn/bn forms that show up in FinanceBench's free-form gold/model
+# text. Widening ``parse_number``'s table would silently change what the
+# production aggregation tool accepts; narrowing this one would drop
+# trillion-scale support from the benchmark. Two small tables, ONE matching
+# algorithm (mirrored, not duplicated-with-drift) is the safer trade-off here.
 _MAG = {
-    "k": 1e3, "thousand": 1e3,
-    "m": 1e6, "mm": 1e6, "million": 1e6,
-    "b": 1e9, "bn": 1e9, "billion": 1e9,
-    "t": 1e12, "trillion": 1e12,
+    "thousand": 1e3, "k": 1e3,
+    "million": 1e6, "mm": 1e6, "m": 1e6,
+    "billion": 1e9, "bn": 1e9, "b": 1e9,
+    "trillion": 1e12, "tn": 1e12, "t": 1e12,
 }
-_NUM_RE = re.compile(
-    r"(-?\$?\s*\d[\d,]*(?:\.\d+)?)\s*(%|kk|k|mm|m|bn|b|tn|t|thousand|million|billion|trillion)?",
+# A bare number, with an optional "%" captured as its own group (percent is a
+# unit, not a magnitude multiplier). The magnitude suffix is matched
+# SEPARATELY below, against the text immediately following the number --
+# never as a branch of this alternation. An alternation tries its branches in
+# LISTED order and accepts the first that matches a *prefix*, not the longest
+# candidate, so "thousand"/"total"/"months" were silently swallowed by the
+# "t"/"m" single-letter branches tried earlier (the bug: "5 thousand" → 5e12,
+# "1,577 total" → 1.577e15, "12 months" → 1.2e7).
+_NUM_RE = re.compile(r"(-?\$?\s*\d[\d,]*(?:\.\d+)?)\s*(%)?", re.IGNORECASE)
+# Anchored as a WHOLE WORD (mirrors ``tools.parse_number``'s ``\b`` anchoring):
+# "m\b" cannot match inside "mm" or "months" because the character right
+# after the "m" is itself a word character, so no boundary exists there. This
+# makes the match correct regardless of alternation order (unlike the old
+# ``_NUM_RE``), since every candidate must consume a full word, never a prefix
+# of a longer unrelated one.
+_SUFFIX_RE = re.compile(
+    r"(?:" + "|".join(re.escape(s) for s in sorted(_MAG, key=len, reverse=True)) + r")\b",
     re.IGNORECASE,
 )
 
 
 def _numbers(text: str) -> list[float]:
     """Extract numeric magnitudes from free text, normalising $, commas, percent
-    and magnitude suffixes to plain floats."""
+    and magnitude suffixes (thousand/k, million/mm/m, billion/bn/b,
+    trillion/tn/t) to plain floats. A suffix only applies when it is the very
+    next WHOLE WORD after the number -- so "1,577 total" or "12 months" are
+    left unscaled instead of misreading "total"/"months" as the "t"/"m"
+    magnitude word they happen to start with, while "5 thousand" correctly
+    scales to 5000 (see ``_SUFFIX_RE``)."""
     out: list[float] = []
-    for raw, suffix in _NUM_RE.findall(text):
+    for m in _NUM_RE.finditer(text):
+        raw, pct = m.group(1), m.group(2)
         digits = raw.replace("$", "").replace(",", "").strip()
         if digits in ("", "-", "."):
             continue
@@ -59,9 +107,13 @@ def _numbers(text: str) -> list[float]:
             val = float(digits)
         except ValueError:
             continue
-        s = suffix.lower()
-        if s and s != "%":
-            val *= _MAG.get(s, 1.0)
+        if pct:
+            out.append(val)
+            continue
+        tail = text[m.end():].lstrip()
+        sm = _SUFFIX_RE.match(tail)
+        if sm:
+            val *= _MAG[sm.group(0).lower()]
         out.append(val)
     return out
 
@@ -160,6 +212,13 @@ def _as_hits(evidence: list[str], doc_id: str) -> list[dict]:
 def score_item(item: dict, response: str, latency_ms: int) -> ItemResult:
     kind = item["kind"]
     gold = item["gold"]
+    if _is_error_response(response):
+        # A provider/transport failure, not an answer -- never numerically or
+        # textually matched (score_item 0 for it, flagged, not hallucinated:
+        # it never reached the model, so it isn't a confident wrong answer).
+        return ItemResult(item["id"], kind, ok=False, answered=False, cited=False,
+                          hallucinated=False, latency_ms=latency_ms, response=response,
+                          reason="provider error (not scored)")
     refused = _REFUSAL in response.lower()
     cited = bool(re.search(r"\[\d+\]", response))
     answered = bool(response.strip()) and not refused
@@ -186,18 +245,16 @@ def score_item(item: dict, response: str, latency_ms: int) -> ItemResult:
 
 def run_smoke(provider: Provider, items: list[dict], *, model_label: str,
               max_tokens: int = 384) -> Scorecard:
-    """Run every item through the grounded prompt on ``provider`` and score it."""
+    """Run every item through the grounded prompt on ``provider`` and score it.
+
+    Reuses :func:`generate_financebench`'s timed generation loop (its default,
+    ``retrieve=None``, is exactly "format the item's own evidence as context" --
+    what this smoke test always did) instead of re-implementing it (CLAUDE.md:
+    one concept, one implementation)."""
     card = Scorecard(model=model_label)
-    for item in items:
-        context = _format_context(_as_hits(item["evidence"], item.get("doc_id", "DOC")))
-        messages = _grounded_messages(item["question"], context)
-        t0 = time.perf_counter()
-        try:
-            res = provider.chat(messages, max_tokens=max_tokens, temperature=0.0)
-            text = res.text or ""
-        except Exception as e:  # a candidate that errors on an item scores 0 for it
-            text = f"[error: {e}]"
-        latency_ms = round((time.perf_counter() - t0) * 1000)
+    for item, text, latency_ms, _hits in generate_financebench(
+        provider, items, max_tokens=max_tokens
+    ):
         card.items.append(score_item(item, text, latency_ms))
     return card
 
@@ -248,10 +305,6 @@ def fb_to_item(rec: dict) -> dict:
             "company": rec.get("company"),
         },
     }
-
-
-_GOLD_NUM_RE = re.compile(r"-?\$?\s*\d[\d,]*(?:\.\d+)?\s*(?:%|billion|million|thousand|bn|b|m|k)?",
-                          re.IGNORECASE)
 
 
 def _match_value_unit_agnostic(response: str, gold: float, tol: float = 0.01) -> bool:
@@ -324,6 +377,14 @@ def score_financebench(item: dict, response: str, *, judge: Provider | None = No
     """Score one real-FinanceBench item: exact-ish numeric match when the gold is
     numeric, else defer to the judge (or a lenient text match if no judge)."""
     gold = item["gold"]["answer"]
+    if _is_error_response(response):
+        # Never numeric/judge-matched -- a provider error's text (a URL, an
+        # HTTP status code) can land inside the ×1000-tolerant matcher's band
+        # purely by accident, which would silently credit a request that
+        # never reached the model.
+        return ItemResult(item["id"], item["kind"], ok=False, answered=False, cited=False,
+                          hallucinated=False, latency_ms=0, response=response,
+                          reason="provider error (not scored)")
     cited = bool(re.search(r"\[\d+\]", response))
     answered = bool(response.strip()) and _REFUSAL not in response.lower()
     gnum = _gold_number(gold)
@@ -338,9 +399,6 @@ def score_financebench(item: dict, response: str, *, judge: Provider | None = No
     return ItemResult(item["id"], item["kind"], ok, answered, cited,
                       hallucinated=answered and not ok, latency_ms=0,
                       response=response, reason=reason)
-
-
-Retrieve = "Callable[[dict], list[dict]]"  # item -> retrieval hits (doc_id/page/text)
 
 
 def make_rag_retrieve(retriever_for, *, k: int = 6):
@@ -406,6 +464,140 @@ def run_financebench(provider: Provider, items: list[dict], *,
     return card
 
 
+# --- full-RAG through the REAL production path (B7) --------------------------
+#
+# ``run_financebench``/``generate_financebench`` above call ``_grounded_messages``
+# directly -- a *shortcut* that skips ``agent.graph.answer()``'s aggregate router
+# (``plan_operation``) and its multi-hop re-query loop. That shortcut is fine for
+# ORACLE mode (it deliberately isolates the generator), but full-RAG must measure
+# what a user actually gets, so it has to go through ``answer()`` itself.
+#
+# Routing through ``answer()`` means retrieval and generation now share one
+# engine that can't hold both the embed/rerank and chat profiles resident at
+# once (docket/phase.py): naively calling ``answer()`` once per question would
+# pay a ~2s profile switch TWICE per question (retrieve -> generate -> next
+# question's retrieve -> ...). ``PrefetchedRetriever`` + ``run_rag_via_answer``
+# below batch this into two passes over the whole question set instead: every
+# question's retrieval first (one held RETRIEVAL window), then every question's
+# generation (one held CHAT window) -- so the switch is paid twice TOTAL, not
+# twice per question. A genuine re-query hop (needs the model's refined query
+# first) is the one case that still falls through to a live retrieval call
+# mid-generation; that is an inherent extra switch, not a batching failure.
+
+
+class PrefetchedRetriever:
+    """Wrap a per-filing :class:`~docket.retrieval.retriever.Retriever` (or the
+    ``--contexts`` replay stand-in) so a BATCH of FinanceBench questions can
+    retrieve everything up front, then generate everything, without paying a
+    phase switch per question.
+
+    ``prefetch(query, k)`` runs the real retrieval call for that exact
+    ``(query, k)`` pair and caches it. ``retrieve`` then serves that exact pair
+    from the cache with NO further call to the inner retriever at all -- so no
+    engine call, so no phase entry, which is the entire point. Anything NOT
+    prefetched (chiefly a re-query hop: ``agent.graph.answer()`` only knows the
+    refined query after seeing a low-confidence first answer, so it can never
+    be prefetched) falls through to the live inner retriever, which legitimately
+    enters RETRIEVAL again.
+    """
+
+    def __init__(self, inner) -> None:
+        self._inner = inner
+        self._cache: dict[tuple[str, int], list[dict]] = {}
+
+    def prefetch(self, query: str, k: int) -> list[dict]:
+        hits = self._inner.retrieve(query, k=k)
+        self._cache[(query, k)] = hits
+        return hits
+
+    def retrieve(self, query: str, *, k: int = 10, candidates: int | None = None) -> list[dict]:
+        cached = self._cache.get((query, k))
+        if cached is not None:
+            return cached
+        return self._inner.retrieve(query, k=k, candidates=candidates)
+
+    def iterative_retrieve(self, queries, *, k: int = 10) -> list[dict]:
+        # A re-query hop is never prefetched (it needs the model's refined
+        # query first) -- always a legitimate live fall-through.
+        return self._inner.iterative_retrieve(queries, k=k)
+
+
+def _answer_k(question: str, settings: Settings) -> int:
+    """The exact ``k`` ``agent.graph.answer()`` will request for ``question``'s
+    FIRST retrieval call -- mirrors ``plan_operation``'s routing and
+    ``_aggregate_answer``'s ``k`` formula exactly, so a pass-1 prefetch using
+    this ``k`` is guaranteed to be the cache hit pass 2 needs."""
+    if plan_operation(question) is not None:
+        return max(settings.context_chunks, 8) * 2
+    return settings.context_chunks
+
+
+def generate_via_answer(
+    items: list[dict],
+    *,
+    retriever_of,
+    provider: Provider,
+    settings: Settings,
+    prefetch: bool = True,
+):
+    """Yield ``(item, response_text, latency_ms, hits)`` for each item, generated
+    through the REAL production path -- ``agent.graph.answer()`` (the aggregate
+    router + grounded QA loop) -- instead of :func:`generate_financebench`'s
+    direct-to-``_grounded_messages`` shortcut.
+
+    ``retriever_of(item) -> retriever | None`` supplies a per-question retriever
+    (``None`` means no corpus for that filing -> an honest refusal, never a gold
+    fallback). When it is a :class:`PrefetchedRetriever` (the live full-RAG
+    case) and ``prefetch`` is true (default), pass 1 retrieves for every item
+    BEFORE pass 2 generates for any of them -- see the module note above for why.
+    The ``--contexts`` replay stand-in has nothing live to prefetch; its
+    ``prefetch`` is a harmless no-op either way.
+    """
+    if prefetch:
+        for item in items:
+            r = retriever_of(item)
+            if r is not None:
+                r.prefetch(item["question"], _answer_k(item["question"], settings))
+
+    for item in items:
+        r = retriever_of(item)
+        t0 = time.perf_counter()
+        if r is None:
+            text, hits = REFUSAL, []
+        else:
+            try:
+                ans = graph_answer(item["question"], retriever=r, provider=provider, settings=settings)
+                text, hits = ans.answer, ans.hits
+            except Exception as e:  # noqa: BLE001 - a candidate that errors on an item scores 0 for it
+                text, hits = f"[error: {e}]", []
+        latency_ms = round((time.perf_counter() - t0) * 1000)
+        yield item, text, latency_ms, hits
+
+
+def run_rag_via_answer(
+    items: list[dict],
+    *,
+    retriever_of,
+    provider: Provider,
+    settings: Settings,
+    judge: Provider | None = None,
+    prefetch: bool = True,
+) -> Scorecard:
+    """Full-RAG FinanceBench, scored through the REAL production
+    ``agent.graph.answer()`` path (see the module note above) instead of
+    :func:`run_financebench`'s direct-prompt shortcut. Batches retrieval ahead
+    of generation via :class:`PrefetchedRetriever` so a phase-switching engine
+    pays the switch once for the whole set, not once per question."""
+    card = Scorecard(model=getattr(provider, "name", "candidate"))
+    for item, text, latency_ms, _hits in generate_via_answer(
+        items, retriever_of=retriever_of, provider=provider, settings=settings, prefetch=prefetch
+    ):
+        r = score_financebench(item, text, judge=judge)
+        r.latency_ms = latency_ms
+        card.items.append(r)
+    return card
+
+
 # --- SFT training-data builder (generator fine-tune) --------------------------
 # Convert items into supervised chat examples in the EXACT grounded format used
 # at inference (`_grounded_messages`), so the LoRA learns the deployed contract:
@@ -416,7 +608,7 @@ def _target_answer(item: dict) -> str:
     the refusal sentinel), matching the production system prompt's rules."""
     kind, gold = item["kind"], item["gold"]
     if kind == "refuse":
-        return "The documents do not contain this."
+        return REFUSAL  # the ONE refusal sentinel (CLAUDE.md), not a repeated literal
     if kind == "financebench":
         ans = str(gold.get("answer", "")).strip()
         return f"{ans} [1]" if "[" not in ans else ans
@@ -427,13 +619,10 @@ def _target_answer(item: dict) -> str:
 
 def to_sft_example(item: dict) -> dict:
     """One item -> a chat SFT record: {"messages": [system, user, assistant]}.
-    The user turn is the identical grounded prompt served in production."""
+    Built from :func:`_grounded_messages` -- the SAME system+user construction
+    used at inference -- instead of rebuilding ``[system, user]`` by hand and
+    reaching for the private ``_SYSTEM`` constant (CLAUDE.md: one implementation
+    of the grounded-prompt contract)."""
     context = _format_context(_as_hits(item["evidence"], item.get("doc_id", "DOC")))
-    user = _grounded_messages(item["question"], context)[-1]["content"]
-    return {
-        "messages": [
-            {"role": "system", "content": _SYSTEM},
-            {"role": "user", "content": user},
-            {"role": "assistant", "content": _target_answer(item)},
-        ]
-    }
+    messages = _grounded_messages(item["question"], context)
+    return {"messages": [*messages, {"role": "assistant", "content": _target_answer(item)}]}
