@@ -110,8 +110,10 @@ offline test suite runs the full pipeline against a fake provider.
 
 ## Benchmarks
 
-FinanceBench, 150 questions, production grounded prompt, shipped retrieval
-winner (`qwen3-embedding-0.6b` + `qwen3-reranker-0.6b`, k=10 context). Two metrics,
+FinanceBench, 150 questions, production grounded prompt, k=10 context. The
+full-RAG accuracy runs used `embed-gemma` + `qwen3-reranker-0.6b`; the shipped
+default embedder is now `qwen3-embedding-0.6b` (higher recall@10 below), and the
+full-RAG numbers have not yet been re-measured under it. Two metrics,
 never mixed: **answer accuracy** (numeric match within tolerance for metrics
 questions, Claude-judged equivalence for free-form ones) and **gold-evidence
 recall@k** (token overlap of retrieved chunks vs the gold evidence span).
