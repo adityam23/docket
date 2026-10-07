@@ -24,13 +24,6 @@ class Capability(Flag):
     SAE = auto()            # Gemma Scope feats -> Tier-3 lab mode (roadmap)
 
 
-def bearer_headers(key: str | None) -> dict[str, str]:
-    """The ONE place an ``Authorization: Bearer`` header gets built (CLAUDE.md
-    'Reusability') -- every /v1 route, including /engine/*, takes the same
-    bearer auth. Returns {} when no key is configured (local dev)."""
-    return {"Authorization": f"Bearer {key}"} if key else {}
-
-
 @dataclass
 class ChatResult:
     text: str

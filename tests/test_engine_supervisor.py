@@ -480,3 +480,28 @@ def test_engine_events_stream_raises_on_non_200(monkeypatch):
 
     with pytest.raises(RuntimeError, match="503"):
         asyncio.run(collect())
+
+
+def test_bring_up_settles_on_404_instead_of_waiting_out_the_startup_window(monkeypatch):
+    """An engine without /engine/ready answers 404 — a permanent "too old"
+    verdict. The spawn loop must report `incompatible` and return at once,
+    not wait the 900 s startup ceiling, kill a working engine and respawn."""
+    _no_wait_for_port_free(monkeypatch)
+    monkeypatch.setattr(engine_mod, "_get", lambda *a, **k: httpx.Response(404, json={}))
+    spawned = []
+
+    def fake_spawn(self):
+        spawned.append(1)
+        self._proc = _FakeProc(pid=333, returncode=None)  # alive
+        self.pid = 333
+
+    monkeypatch.setattr(EngineSupervisor, "_spawn", fake_spawn)
+    monkeypatch.setattr(EngineSupervisor, "_kill_group", lambda self, proc: None)
+    sup = EngineSupervisor(Settings(engine_binary="/bin/true"))
+    sup._wake = _FastEvent()
+
+    sup._bring_up()
+
+    assert spawned == [1]
+    assert sup.state == "incompatible"
+    assert sup.pid == 333, "the answering child stays tracked, never killed"

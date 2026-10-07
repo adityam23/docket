@@ -50,10 +50,11 @@ from urllib.parse import urlparse
 import httpx
 
 from .config import Settings, load_settings
+from .auth import bearer_headers
 
 
 def _headers(settings: Settings) -> dict[str, str]:
-    return {"Authorization": f"Bearer {settings.engine_key}"} if settings.engine_key else {}
+    return bearer_headers(settings.engine_key)
 
 
 def _engine_base(settings: Settings) -> str:
@@ -574,16 +575,13 @@ class EngineSupervisor:
         while not self._stop:
             probe = self._probe()
             if probe["alive"]:
-                if probe["code"] == 200:
-                    with self._lock:
-                        self.state = "available"
-                        self.attempts = 0
-                        self.phase = probe["body"].get("phase", {})
-                        self.reason = self.detail = None
-                        self.active = probe.get("active")
-                        self.switching = probe.get("switching")
+                # Only a 503 means "still preparing"; 200 (ready) and any other
+                # answer (404 = too old, a permanent verdict) are settled — the
+                # loop's alive-watch takes over, never a 900 s wait + respawn.
+                settled = probe["code"] != 503
+                self._report_alive(probe, reset_attempts=settled)
+                if settled:
                     return
-                self._report_alive(probe, reset_attempts=False)
             proc = self._proc
             if proc is None or proc.poll() is not None:
                 died_code = proc.poll() if proc is not None else None

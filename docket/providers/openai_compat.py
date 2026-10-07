@@ -11,7 +11,8 @@ from urllib.parse import quote
 
 import httpx
 
-from .base import ChatResult, SlotUnavailable, bearer_headers
+from ..auth import bearer_headers
+from .base import ChatResult, SlotUnavailable
 
 # Control/NUL bytes (keep \t \n \r) — PDF text extraction (pypdf) leaves stray
 # NULs in real filings, and the backend rejects them ("nul byte found in provided
