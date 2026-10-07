@@ -84,6 +84,18 @@ class Retriever:
             self.collection, query, mode=self.mode, k=candidates if candidates is not None else self.candidates,
             allowlist=allowlist,
         )
+        # Drop orphans BEFORE rerank: cross-encoder time is the dominant cost
+        # (~0.5 ms/token on the reference card), never spend it on a hit we
+        # can't cite.
+        lineage = {row["document_id"]: self.lineage.find(row["document_id"]) for row in rows}
+        kept = [row for row in rows if lineage[row["document_id"]] is not None]
+        dropped = len(rows) - len(kept)
+        if dropped:
+            log.warning(
+                "retrieve(%r): dropped %d engine hit(s) with no lineage row (orphaned chunk_id)",
+                query, dropped,
+            )
+        rows = kept
         if not rows:
             return []
 
@@ -99,12 +111,8 @@ class Retriever:
             ]
 
         hits = []
-        dropped = 0
-        for row in rows:
-            lin = self.lineage.find(row["document_id"])
-            if lin is None:
-                dropped += 1
-                continue
+        for row in rows[:k]:
+            lin = lineage[row["document_id"]]
             hits.append(
                 {
                     "chunk_id": row["document_id"],
@@ -116,13 +124,6 @@ class Retriever:
                     **{f: getattr(lin, f) for f in FILING_FIELDS},
                     "score": round(float(row["score"]), 6),
                 }
-            )
-            if len(hits) >= k:
-                break
-        if dropped:
-            log.warning(
-                "retrieve(%r): dropped %d engine hit(s) with no lineage row (orphaned chunk_id)",
-                query, dropped,
             )
         for rank, hit in enumerate(hits):
             hit["rank"] = rank
