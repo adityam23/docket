@@ -49,6 +49,24 @@ const postJSON = (path, body) => request(path, jsonOpts('POST', body));
 const patchJSON = (path, body) => request(path, jsonOpts('PATCH', body));
 const del = (path) => request(path, jsonOpts('DELETE'));
 
+// One way to read a message out of a browser `error` Event dispatched by an
+// EventSource (shared by every SSE consumer below — CLAUDE.md: one
+// implementation). A server-sent `event: error` frame carries JSON `.data`
+// (`{"detail"|"message": "..."}`, framed by web/sse.py's `sse()`); a bare
+// network-level connection drop carries none, so callers get `fallback`
+// instead of us inventing a reason we were never given.
+function sseErrorMessage(e, fallback) {
+	if (e?.data) {
+		try {
+			const d = JSON.parse(e.data);
+			return d.detail || d.message || fallback;
+		} catch {
+			/* not JSON — keep fallback */
+		}
+	}
+	return fallback;
+}
+
 // Read a File (from a folder picker) into a base64 payload for /api/ingest/upload.
 function fileToB64(file) {
 	return new Promise((resolve, reject) => {
@@ -97,12 +115,24 @@ export const api = {
 	// the bearer, so no CORS / secret exposure (see web/app.py).
 	engine: () => getJSON('/api/engine'),
 	engineProfile: (name) => request('/api/engine/profile', jsonOpts('PUT', { name })),
+	// Supervisor's honest lifecycle view (F3): offline/starting/available/
+	// degraded/incompatible/failed + phase/reason/detail. Polled by
+	// stores/supervision.js — one poller, every consumer reads the store.
+	engineSupervision: () => getJSON('/api/engine/supervision'),
+	// The only exit from `failed` and from the port-held `offline` state.
+	// Returns the fresh supervision view (same shape as engineSupervision()).
+	engineRestart: () => postJSON('/api/engine/restart'),
 	// Live profile-switch progress: replayed SSE (last 100 events on connect).
 	// Returns a cancel fn; onEvent fires per SSE event (JSON data payloads).
+	// onError gets a human reason (never silently invisible — F3): the proxy
+	// sends one `event: error` frame with a message before closing on failure;
+	// a bare connection drop reports a generic fallback instead.
 	engineEvents(onEvent, onError) {
 		const es = new EventSource('/api/engine/events');
 		es.onmessage = (e) => { try { onEvent(JSON.parse(e.data)); } catch { onEvent(e.data); } };
-		es.onerror = () => onError?.();
+		es.addEventListener('error', (e) => {
+			onError?.(sseErrorMessage(e, 'connection lost'));
+		});
 		return () => es.close();
 	},
 
@@ -131,19 +161,11 @@ export const api = {
 			}
 		});
 		es.addEventListener('error', (e) => {
-			// A server-sent `error` event carries JSON; a browser connection drop does
-			// not. Ignore errors after we've already received `done`.
+			// Ignore errors after we've already received `done` (the server closing
+			// the stream post-done also fires `error`, which isn't a real failure).
 			if (finished) return;
 			finished = true;
-			let msg = 'stream connection error';
-			if (e.data) {
-				try {
-					msg = JSON.parse(e.data).detail || msg;
-				} catch {
-					/* keep default */
-				}
-			}
-			onError(msg);
+			onError(sseErrorMessage(e, 'stream connection error'));
 			es.close();
 		});
 		return () => {

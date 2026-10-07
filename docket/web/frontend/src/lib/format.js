@@ -47,6 +47,49 @@ export function gb(bytes) {
 	return (bytes / 1024 ** 3).toFixed(1);
 }
 
+// Engine supervision state (GET /api/engine/supervision) → a stable monochrome
+// tone, shared by the TopNav dot and EnginePanel (F3, CLAUDE.md: one place).
+// Red (`down`) is reserved for the two truly broken states — the design
+// language keeps amber/green for the reliability triad elsewhere, so every
+// other state reads as neutral progress text, never a fake "ok" colour.
+const SUPERVISION_TONE = {
+	available: 'up',
+	starting: 'busy',
+	degraded: 'warn',
+	incompatible: 'warn',
+	offline: 'down',
+	failed: 'down'
+};
+
+export function supervisionTone(state) {
+	return SUPERVISION_TONE[state] || 'neutral';
+}
+
+// Compact, honest one-line status for the TopNav indicator (always visible,
+// F3 item 1) — a minutes-long first-run weight download reads as a real
+// percentage when the engine has reported both byte counts, never a bare
+// "offline". The fuller reason/detail/phase breakdown lives in EnginePanel;
+// this stays short enough for the header strip.
+export function supervisionText(view) {
+	if (!view) return 'checking…';
+	const { state, phase, reason } = view;
+	if (state === 'starting') {
+		const p = phase || {};
+		if (p.phase === 'downloading' && p.model) {
+			const known = p.bytes_done != null && p.bytes_total;
+			return `downloading ${p.model}${known ? ` ${pct(p.bytes_done / p.bytes_total)}` : ''}`;
+		}
+		if (p.phase === 'loading') return `loading ${p.model || 'model'}`;
+		return 'starting…';
+	}
+	if (state === 'available') return 'engine online';
+	if (state === 'offline') return reason ? `offline — ${reason}` : 'engine offline';
+	if (state === 'degraded') return reason ? `degraded — ${reason}` : 'degraded';
+	if (state === 'incompatible') return reason ? `incompatible — ${reason}` : 'incompatible engine';
+	if (state === 'failed') return reason ? `failed — ${reason}` : 'engine failed';
+	return state || 'unknown';
+}
+
 // Reliability label → tone + copy. The triad 🟢/🟡/🔴 exists ONLY as chip/dot
 // colours on reliability surfaces — never decorative glyph text.
 export const RELIABILITY = {

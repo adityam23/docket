@@ -22,21 +22,23 @@
 	let keyInput = $state({ engine: '' });
 	let keyBusy = $state('');
 
-	const NUMS = ['request_timeout_s', 'chunk_words', 'chunk_overlap', 'retrieval_k', 'context_chunks', 'max_hops'];
+	const NUMS = ['request_timeout_s', 'retrieval_k', 'context_chunks', 'max_hops'];
+
+	// Mirrors Settings.engine_collection's server-side pattern (config.py
+	// _COLLECTION_NAME_PATTERN) — client-side so a bad name is caught before
+	// the round trip; the server validates for real and is authoritative.
+	const COLLECTION_PATTERN = /^[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}$/;
 
 	function initForm() {
 		const r = cfg.retrieval;
 		form = {
 			backend_url: cfg.backend_url,
 			chat_model: cfg.chat_model,
-			embed_model: cfg.embed_model,
 			rerank_model: cfg.rerank_model,
 			engine_binary: cfg.supervision?.engine_binary || '',
 			mettle_config: cfg.supervision?.mettle_config || '',
 			engine_collection: cfg.retrieval.engine_collection,
 			retrieval_mode: cfg.retrieval.retrieval_mode,
-			chunk_words: r.chunk_words,
-			chunk_overlap: r.chunk_overlap,
 			retrieval_k: r.retrieval_k,
 			context_chunks: r.context_chunks,
 			max_hops: r.max_hops,
@@ -44,6 +46,8 @@
 		};
 		original = { ...form };
 	}
+
+	let collectionValid = $derived(COLLECTION_PATTERN.test(form.engine_collection ?? ''));
 
 	async function load() {
 		try {
@@ -140,8 +144,11 @@
 		</div>
 	</div>
 
-	<!-- Rerank, embeddings & chunking -->
-	<div class="list-section-title">Rerank, embeddings &amp; chunking</div>
+	<!-- Reranker. Embeddings + chunking (chunk_words/chunk_overlap) are a frozen
+	     parity substrate and embed_model only affects the offline `dk embed`
+	     path — all three are env-only developer config, not web-writable
+	     (config_write.py WRITABLE_FIELDS), so there's nothing to edit here. -->
+	<div class="list-section-title">Reranker</div>
 	<div class="list-menu">
 		<div class="list-row">
 			<div>
@@ -149,18 +156,6 @@
 				<div class="lr-hint">Cross-encoder served at <span class="mono">/v1/rerank</span>; the reranked order is what ships.</div>
 			</div>
 			<input type="text" bind:value={form.rerank_model} spellcheck="false" style="max-width: 320px" />
-		</div>
-		<div class="list-row">
-			<div><div class="lr-label">Embedding model</div></div>
-			<input type="text" bind:value={form.embed_model} spellcheck="false" style="max-width: 320px" />
-		</div>
-		<div class="list-row">
-			<div><div class="lr-label">Chunk size (words)</div></div>
-			<input type="number" min="20" bind:value={form.chunk_words} style="max-width: 140px" />
-		</div>
-		<div class="list-row">
-			<div><div class="lr-label">Chunk overlap</div></div>
-			<input type="number" min="0" bind:value={form.chunk_overlap} style="max-width: 140px" />
 		</div>
 	</div>
 
@@ -181,12 +176,24 @@
 		<div class="list-row">
 			<div>
 				<div class="lr-label">Collection</div>
-				<div class="lr-hint">Engine collection filings are ingested into.</div>
+				<div class="lr-hint">
+					Engine collection filings are ingested into. 1–128 chars: letters, digits,
+					<span class="mono">. _ -</span>, never starting with a dot (server-enforced).
+				</div>
+				{#if form.engine_collection && !collectionValid}
+					<div class="lr-hint" style="color: var(--bad)">Doesn't match the allowed pattern — the save will be rejected.</div>
+				{/if}
 			</div>
-			<input type="text" bind:value={form.engine_collection} spellcheck="false" style="max-width: 280px" />
+			<input
+				type="text"
+				bind:value={form.engine_collection}
+				spellcheck="false"
+				aria-invalid={form.engine_collection ? !collectionValid : false}
+				style="max-width: 280px"
+			/>
 		</div>
 		<div class="list-row">
-			<div><div class="lr-label">Candidates (k)</div><div class="lr-hint">Chunks pulled before ranking.</div></div>
+			<div><div class="lr-label">Candidates (k)</div><div class="lr-hint">Candidates pulled before rerank (default 40).</div></div>
 			<input type="number" min="1" bind:value={form.retrieval_k} style="max-width: 140px" />
 		</div>
 		<div class="list-row">
@@ -204,7 +211,7 @@
 	</div>
 
 	<div class="row" style="margin: 22px 0 8px; gap: 12px">
-		<button class="btn" onclick={save} disabled={saving}>
+		<button class="btn" onclick={save} disabled={saving || !collectionValid}>
 			{#if saving}<span class="spin"></span> Saving…{:else}Save settings{/if}
 		</button>
 		{#if saved}<Chip tone="neutral" dot>Saved</Chip>{/if}

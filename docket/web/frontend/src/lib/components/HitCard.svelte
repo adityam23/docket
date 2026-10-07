@@ -3,10 +3,14 @@
 	// score and expands to the FULL stored chunk text. The always-available "see
 	// the referenced span" fallback (T13) — no retained PDF needed. Flat dark
 	// field, square corners.
+	import { untrack } from 'svelte';
 	import Icon from './Icon.svelte';
 
 	let { hit, n = null, open = false } = $props();
-	let expanded = $state(open);
+	// `open` is only ever an initial value (no caller passes a reactive
+	// binding) — `untrack` makes that explicit so the compiler doesn't warn
+	// that a later change to the `open` prop wouldn't flow through here.
+	let expanded = $state(untrack(() => open));
 	// A short chunk isn't worth a toggle — only clamp when there's more to reveal.
 	let clampable = $derived((hit.text || '').length > 180);
 </script>

@@ -8,7 +8,8 @@
 	// read as neutral text; only a hard error takes `.bad`.
 	import { onMount, onDestroy } from 'svelte';
 	import { api, errMsg } from '$lib/api.js';
-	import { gb } from '$lib/format.js';
+	import { gb, supervisionTone, supervisionText } from '$lib/format.js';
+	import { supervision } from '$lib/stores/supervision.js';
 	import Icon from '$lib/components/Icon.svelte';
 
 	let eng = $state(null);       // GET /api/engine payload
@@ -16,6 +17,18 @@
 	let busy = $state('');        // profile name being switched
 	let lastEvt = $state(null);   // latest SSE event (activation progress line)
 	let closeEvents = $state(null);
+	let streamError = $state(''); // honest reason when the SSE stream dies (F3)
+
+	// Supervisor's lifecycle view (F3) — this panel is the detail home: the
+	// compact TopNav dot shows the same state, this shows the full phase/
+	// reason/detail the engine reported. One poller (stores/supervision.js);
+	// this component just attaches for as long as it's mounted.
+	let sup = $derived($supervision.view);
+	let supTone = $derived(supervisionTone(sup?.state));
+	let supText = $derived(supervisionText(sup));
+	let detachSupervision;
+	onMount(() => (detachSupervision = supervision.attach()));
+	onDestroy(() => detachSupervision?.());
 
 	function load() {
 		api.engine()
@@ -28,16 +41,24 @@
 			.catch((e) => (err = errMsg(e)));
 	}
 	function startEvents() {
+		streamError = '';
 		closeEvents = api.engineEvents(
 			(ev) => {
 				lastEvt = ev;
+				streamError = '';
 				// An activation settling (or a slot change) invalidates the cached
 				// view — refresh so the active profile + states are live.
 				if (ev && (ev.profile_active || ev.slot_unavailable || ev.slot_available)) {
 					load();
 				}
 			},
-			() => {}
+			(reason) => {
+				// Honest, not invisible: say the stream is down instead of just
+				// freezing the last progress line with no explanation. The
+				// EventSource retries on its own (we don't recreate it) — a
+				// subsequent event clears this via the onEvent handler above.
+				streamError = reason;
+			}
 		);
 	}
 	onMount(load);
@@ -67,9 +88,33 @@
 		if (typeof ev === 'string') return ev;
 		return ev.text || ev.type || JSON.stringify(ev).slice(0, 140);
 	}
+	// `detail` is whatever the engine's /engine/ready reported verbatim — a
+	// string (a mettle reason like "dropped_vram") or a structured body.
+	// Render it honestly either way rather than assuming a shape.
+	function detailText(d) {
+		if (d == null || d === '') return '';
+		if (typeof d === 'string') return d;
+		try {
+			return JSON.stringify(d);
+		} catch {
+			return String(d);
+		}
+	}
 </script>
 
 <div class="engine">
+	{#if sup}
+		<div class="cap">SUPERVISION</div>
+		<div class="sup-row">
+			<span class="r-dot {supTone === 'down' ? 'bad' : supTone === 'up' ? 'up' : ''}"></span>
+			<span>{supText}</span>
+			{#if sup.pid}<span class="mute2 small mono">pid {sup.pid}</span>{/if}
+		</div>
+		{#if detailText(sup.detail)}
+			<div class="small mute2 sup-detail">{detailText(sup.detail)}</div>
+		{/if}
+	{/if}
+
 	{#if !eng}
 		<div class="empty"><div class="spin"></div></div>
 	{:else if !eng.available}
@@ -134,6 +179,12 @@
 				<span class="small mute2">{evtText(lastEvt)}</span>
 			</div>
 		{/if}
+		{#if streamError}
+			<div class="evt">
+				<Icon name="alert" size={14} />
+				<span class="small">live updates unavailable — {streamError}</span>
+			</div>
+		{/if}
 	{/if}
 
 	{#if err}
@@ -167,9 +218,13 @@
 	.slot { display: flex; align-items: center; gap: 8px; font-size: 0.82rem; color: var(--text-dim); }
 	.r-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--neutral); flex-shrink: 0; }
 	.r-dot.bad { background: var(--bad); }
+	.r-dot.up { background: var(--text); }
 	.s-cap { color: var(--text-mute); font-size: 0.7rem; letter-spacing: 0.06em; min-width: 42px; }
 	.s-id { color: var(--text); font-variant-numeric: tabular-nums; }
 	.s-st { margin-left: auto; }
+
+	.sup-row { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
+	.sup-detail { margin-top: 2px; word-break: break-word; }
 
 	.evt { display: flex; align-items: center; gap: 8px; margin-top: 12px; color: var(--text-mute); }
 

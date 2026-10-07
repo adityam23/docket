@@ -3,31 +3,22 @@
 	import { onMount } from 'svelte';
 	import { page } from '$app/stores';
 	import TopNav from '$lib/components/TopNav.svelte';
-	import { api } from '$lib/api.js';
 	import { ingest } from '$lib/stores/ingest.js';
+	import { supervision } from '$lib/stores/supervision.js';
 	import { ui } from '$lib/stores/ui.js';
 
 	let { children } = $props();
-	let health = $state(null);
-
-	async function refresh() {
-		try {
-			health = await api.health();
-		} catch {
-			health = { ok: false, error: 'unreachable' };
-		}
-	}
 
 	onMount(() => {
 		ui.hydrate(); // apply persisted density / motion prefs to <html>
-		refresh();
-		const t = setInterval(refresh, 15000);
-		// App-wide ingest poller (T12): keeps the header indicator live on every
-		// route, so background ingestion stays visible after navigating away.
-		const detach = ingest.attach();
+		// App-wide pollers (T12 / F3): keep the header indicators live on every
+		// route — ingestion progress and engine state both survive navigation
+		// instead of each component re-polling its own copy.
+		const detachIngest = ingest.attach();
+		const detachSupervision = supervision.attach();
 		return () => {
-			clearInterval(t);
-			detach();
+			detachIngest();
+			detachSupervision();
 		};
 	});
 
@@ -37,7 +28,7 @@
 </script>
 
 <div class="app">
-	<TopNav {health} />
+	<TopNav />
 	{#key path}
 		<main class="main turn">
 			{@render children()}

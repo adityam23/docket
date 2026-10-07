@@ -5,8 +5,10 @@
 	// degradation, per the anti-slop rule):
 	//   Sources   — citations + retrieved chunks (always present)
 	//   Reasoning — the full persisted trace timeline (lazy-loaded by trace_id)
-	//   Lab       — SAE feature-attribution / steering; requires a white-box local
-	//               backend. On hosted API keys it degrades to an honest note.
+	//   Lab       — SAE feature-attribution / steering; a planned capability,
+	//               deliberately deferred behind the accuracy push (not built
+	//               yet) — rendered as an honest "not available" note, never a
+	//               locked tease.
 	import { api, errMsg } from '$lib/api.js';
 	import { filingCite } from '$lib/format.js';
 	import HitCard from '$lib/components/HitCard.svelte';
@@ -111,11 +113,11 @@
 						<div class="mute2 small">Feature attribution rendering.</div>
 					{:else}
 						<div class="degraded">
-							<div class="dg-title">Lab mode isn't available on this backend</div>
+							<div class="dg-title">Lab mode isn't available yet</div>
 							The glass-box layer — SAE feature attribution, steering, and the
-							white-box uncertainty detector — needs a local, logprob-exposing model
-							(it can't run over a hosted API). Point this instance at a local backend
-							in <a href="/settings">Settings</a> to enable it.
+							white-box uncertainty detector — is a planned capability, deferred
+							behind the current accuracy push. There's no setting that turns it on;
+							it isn't built yet.
 						</div>
 					{/if}
 				</div>
