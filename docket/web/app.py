@@ -2,8 +2,8 @@
 
 Two layers:
 - a JSON **observability API** under ``/api/*`` — corpus + per-document ingest
-  stage, embedding state, redacted config, backend health, a retrieval-traced
-  ``ask``, and a live ingest job runner; and
+  stage, retrieval config (collection/embed/rerank model), redacted config,
+  backend health, a retrieval-traced ``ask``, and a live ingest job runner; and
 - the **SvelteKit dashboard** (``web/frontend/build``), served as a static SPA
   when built. Every endpoint is a thin transport over the shared service /
   observability functions, so the wiring lives exactly once (CLAUDE.md).

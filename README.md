@@ -88,7 +88,7 @@ features fail loudly (no silent local fallback).
 |---|---|
 | `DK_BACKEND_URL` | `/v1` base of the mettle engine. Default `http://127.0.0.1:11434/v1` |
 | `DK_CHAT_MODEL` | Chat model id (or `role:<kind>` resolved from the engine's active profile) |
-| `DK_EMBED_MODEL` | Embedding model id used at ingest time |
+| `DK_EMBED_MODEL` | Embedding model id for the offline `dk embed` path only; ingest POSTs chunks to the engine's collection, which embeds with its own default model |
 | `DK_RERANK_MODEL` | Cross-encoder reranker id. Default `qwen3-reranker-0.6b:latest` |
 | `DK_ENGINE_BINARY` | Path to the `mettled` binary; set to let docket supervise (spawn + crash-restart) it |
 | `DK_METTLE_CONFIG` | Passed to the engine as `METTLE_CONFIG` when spawning |
@@ -111,7 +111,7 @@ offline test suite runs the full pipeline against a fake provider.
 ## Benchmarks
 
 FinanceBench, 150 questions, production grounded prompt, shipped retrieval
-winner (`embed-gemma` + `qwen3-reranker-0.6b`, k=10 context). Two metrics,
+winner (`qwen3-embedding-0.6b` + `qwen3-reranker-0.6b`, k=10 context). Two metrics,
 never mixed: **answer accuracy** (numeric match within tolerance for metrics
 questions, Claude-judged equivalence for free-form ones) and **gold-evidence
 recall@k** (token overlap of retrieved chunks vs the gold evidence span).

@@ -8,9 +8,10 @@ license = { text = "GPL-3.0-only" }
 authors = [{ name = "Aditya Menon" }]
 
 # Base deps are deliberately small so `uv sync` is fast and light on disk.
-# Heavier, phase-gated layers (OCR, turbovec, eval, interpretability, the
-# Kafka/Spark platform) are added when their
-# phase lands — keeping the resolver quick and the lite install tiny.
+# Heavier, phase-gated layers (OCR, eval, interpretability, the Kafka/Spark
+# platform) are added when their phase lands — keeping the resolver quick
+# and the lite install tiny. (Vector search/turbovec is mettle-side, not a
+# docket dependency.)
 dependencies = [
     "httpx>=0.27",
     "pydantic>=2.7",

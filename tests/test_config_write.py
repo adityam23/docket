@@ -54,7 +54,7 @@ def test_update_config_rejects_unknown_and_bad_type(tmp_path, monkeypatch):
     with pytest.raises(cw.ConfigWriteError):
         cw.update_config({"nonsense_key": 1})           # not in the allowlist
     with pytest.raises(cw.ConfigWriteError):
-        cw.update_config({"cerebras_api_key": "x"})     # secrets are not knob-writable
+        cw.update_config({"provider_api_key": "x"})     # secrets are not knob-writable
     with pytest.raises(cw.ConfigWriteError):
         cw.update_config({"retrieval_k": "not-an-int"})  # type violation
 
