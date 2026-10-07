@@ -124,7 +124,8 @@ export const STAGE = {
 	indexed: { tone: 'neutral', label: 'Indexed' },
 	done: { tone: 'info', label: 'Done' },
 	skipped: { tone: 'neutral', label: 'Skipped' },
-	failed: { tone: 'bad', label: 'Failed' }
+	failed: { tone: 'bad', label: 'Failed' },
+	error: { tone: 'bad', label: 'Failed' }
 };
 
 export function stage(s) {
