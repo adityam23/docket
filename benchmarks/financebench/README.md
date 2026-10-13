@@ -127,9 +127,9 @@ the retriever was optimised *before* spending generator tokens.
 
 > **Cutover note (2026-09-10).** Retrieval lives engine-side now (mettle
 >`/v1`): the docket-local recall-sweep machinery (`sweep_recall.py` and the
->parity scripts) was **removed** at the mettle-only cutover; their measurement
->documents (`METTLE_PARITY_CONTRACT.md`, `BEST_CONFIG_CONTRACT.md`, verdict)
->and results JSONs remain as the historical record. Full-RAG reproduction is
+>parity scripts) was **removed** at the mettle-only cutover; their results
+>JSONs remain as the historical record (the measurement contracts are
+>operator-local, not published). Full-RAG reproduction is
 >`run_full.py --rag` below — retrieval now goes through the engine's collection
 >search + `/v1/rerank` via the production pipeline.
 

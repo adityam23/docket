@@ -53,3 +53,10 @@ run_sweep_resilient.sh
 
 # Internal design docs — local only, never publish
 docs/
+
+# Cross-repo agent contracts/questions + portfolio drafts — local only, never publish
+QUESTIONS from *.md
+METTLE_ONLY_CUTOVER_CONTRACT.md
+benchmarks/financebench/*_CONTRACT.md
+benchmarks/financebench/results/BEST_CONFIG_VERDICT.md
+portfolio/
