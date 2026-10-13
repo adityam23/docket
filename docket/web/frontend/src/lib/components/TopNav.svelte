@@ -64,7 +64,7 @@
 
 <header class="topnav">
 	<div class="bar">
-		<a href="/" class="brand caps">agent·assistant</a>
+		<a href="/" class="brand">Docket</a>
 
 		<nav class="pivots" aria-label="Primary">
 			{#each nav as item}
@@ -107,7 +107,7 @@
 		height: 58px; display: flex; align-items: center; gap: 34px;
 	}
 	.brand {
-		color: var(--text); letter-spacing: 0.14em; font-size: 0.72rem;
+		color: var(--text); font-size: 1.05rem; font-weight: 600;
 		white-space: nowrap;
 	}
 

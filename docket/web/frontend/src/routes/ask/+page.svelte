@@ -13,6 +13,7 @@
 	import { onDestroy, tick } from 'svelte';
 	import { api, errMsg } from '$lib/api.js';
 	import { num, caution } from '$lib/format.js';
+	import Answer from '$lib/components/Answer.svelte';
 	import Chip from '$lib/components/Chip.svelte';
 	import ExplainDrawer from '$lib/components/ExplainDrawer.svelte';
 	import Icon from '$lib/components/Icon.svelte';
@@ -119,21 +120,6 @@
 		}
 	}
 
-	// Split an answer into text + [n] citation pills.
-	function splitCitations(text) {
-		const parts = [];
-		let last = 0;
-		const re = /\[(\d+)\]/g;
-		let m;
-		while ((m = re.exec(text)) !== null) {
-			if (m.index > last) parts.push({ t: 'text', v: text.slice(last, m.index) });
-			parts.push({ t: 'cite', v: m[1] });
-			last = re.lastIndex;
-		}
-		if (last < text.length) parts.push({ t: 'text', v: text.slice(last) });
-		return parts;
-	}
-
 	let anyLoading = $derived(turns.some((t) => t.loading));
 </script>
 
@@ -187,13 +173,8 @@
 				</div>
 			{:else if t.res}
 				{@const warn = caution(t.res.reliability)}
-				{@const parts = splitCitations(t.res.answer || '')}
 				<div class="who caps">answer</div>
-				<div class="answer">
-					{#each parts as p}
-						{#if p.t === 'cite'}<span class="cite-pill" title="source {p.v}">{p.v}</span>{:else}{p.v}{/if}
-					{/each}
-				</div>
+				<Answer text={t.res.answer} />
 
 				{#if warn}
 					<div class="glance {warn.tone}">
@@ -249,13 +230,6 @@
 		padding-left: 12px; border-left: 3px solid var(--accent);
 	}
 
-	.answer { font-size: var(--fs-normal); line-height: 1.7; white-space: pre-wrap; max-width: 78ch; }
-	.cite-pill {
-		display: inline-grid; place-items: center; min-width: 19px; height: 19px; padding: 0 4px;
-		background: var(--accent-soft); color: var(--accent-bright); border-radius: 2px;
-		font: 600 0.72rem/1 var(--mono); vertical-align: baseline; margin: 0 1px;
-		cursor: default;
-	}
 	.glance {
 		display: flex; gap: 9px; align-items: flex-start; margin-top: 14px;
 		padding: 11px 13px; border-radius: var(--radius-sm); font-size: 0.88rem; max-width: 78ch;
@@ -295,6 +269,6 @@
 	.new-chat { padding: 7px 12px; font-size: 0.8rem; }
 
 	@media (max-width: 720px) {
-		.user-q, .answer { max-width: 100%; }
+		.user-q { max-width: 100%; }
 	}
 </style>

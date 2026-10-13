@@ -11,7 +11,7 @@ from .providers.router import get_provider
 app = typer.Typer(
     add_completion=False,
     pretty_exceptions_enable=False,  # clean one-line errors, no rich traceback
-    help="docket — self-hostable agentic document engine",
+    help="Docket — a self-hosted research assistant for SEC filings: answers cited to the exact filing page, from a local model.",
 )
 
 

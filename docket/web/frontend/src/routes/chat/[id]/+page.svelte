@@ -7,6 +7,7 @@
 	import { page } from '$app/stores';
 	import { api, errMsg } from '$lib/api.js';
 	import { when, reliability } from '$lib/format.js';
+	import Answer from '$lib/components/Answer.svelte';
 	import Chip from '$lib/components/Chip.svelte';
 	import Icon from '$lib/components/Icon.svelte';
 	import Timeline from '$lib/components/Timeline.svelte';
@@ -55,7 +56,7 @@
 		<div class="question">{trace.question}</div>
 
 		<div class="who caps" style="margin-top: 22px">answer</div>
-		<div class="answer">{trace.answer}</div>
+		<Answer text={trace.answer} />
 
 		<div class="row wrap meta">
 			<Chip tone={reliability(trace.reliability).tone} dot>{trace.reliability}</Chip>
@@ -84,6 +85,5 @@
 		font-size: var(--fs-ml); font-weight: var(--w-semibold); letter-spacing: -0.01em;
 		padding-left: 12px; border-left: 3px solid var(--accent);
 	}
-	.answer { white-space: pre-wrap; line-height: 1.7; max-width: 78ch; }
 	.meta { margin-top: 20px; }
 </style>

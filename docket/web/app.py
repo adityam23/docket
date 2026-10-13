@@ -60,7 +60,7 @@ from .sse import sse
 _MAX_FILE_BYTES = 50 * 1024 * 1024
 _MAX_UPLOAD_BYTES = 200 * 1024 * 1024
 
-app = FastAPI(title="docket", version="0.2.0")
+app = FastAPI(title="Docket", version="0.2.0")
 
 
 # --- Host/Origin protection (DNS rebinding + CSRF) ---------------------------
