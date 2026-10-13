@@ -13,6 +13,7 @@
 	import { onDestroy, tick } from 'svelte';
 	import { api, errMsg } from '$lib/api.js';
 	import { num, caution } from '$lib/format.js';
+	import CalcList from '$lib/components/CalcList.svelte';
 	import Chip from '$lib/components/Chip.svelte';
 	import ExplainDrawer from '$lib/components/ExplainDrawer.svelte';
 	import Icon from '$lib/components/Icon.svelte';
@@ -195,6 +196,13 @@
 					{/each}
 				</div>
 
+				{#if t.res.calculations?.length}
+					<div class="calc-block">
+						<div class="who caps">calculations</div>
+						<CalcList calculations={t.res.calculations} />
+					</div>
+				{/if}
+
 				{#if warn}
 					<div class="glance {warn.tone}">
 						<Icon name="alert" size={15} /><span>{warn.text}</span>
@@ -238,6 +246,7 @@
 	.stream > :first-child { margin-top: 0 !important; }
 
 	.intro { text-align: center; color: var(--text-mute); margin: auto; max-width: 44ch; padding-bottom: 40px; }
+	.calc-block { margin-top: 14px; }
 	.intro-glyph { color: var(--text-faint); display: grid; place-items: center; }
 	.intro-copy { margin-top: 10px; color: var(--text-dim); }
 
