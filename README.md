@@ -100,8 +100,10 @@ features fail loudly (no silent local fallback).
 ```
 ingest:  pdf -> ocr -> chunk -> POST chunks to the engine collection
 answer:  query -> engine search (dense/keyword/hybrid) -> cross-encoder rerank
-         -> grounded LLM hops -> cited answer + per-token confidence label
+         -> grounded LLM hops -> cited answer + per-token confidence label*
 ```
+
+\* The confidence label is currently always `unknown`: mettle omits token logprobs for reasoning models such as the Qwen distill, and docket shows that honestly rather than inventing a score.
 
 docket stores only chunk **lineage** locally (doc ids, pages, sources, filing
 metadata) — chunk text and vectors live engine-side. Search, rerank, embed and

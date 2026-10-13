@@ -141,7 +141,7 @@
 	<div class="row spread wrap" style="align-items: flex-end">
 		<div style="min-width: 0">
 			<h1 class="page-title">ask</h1>
-			<p class="page-sub">Grounded, cited answers with a reliability signal.</p>
+			<p class="page-sub">Grounded answers, cited to the page.</p>
 		</div>
 		<div class="row wrap">
 			{#if scope}
