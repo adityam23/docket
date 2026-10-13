@@ -142,10 +142,6 @@
 	.source { display: flex; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--line); }
 	.source:last-child { border-bottom: none; }
 	.quote { color: var(--text-dim); font-size: 0.85rem; margin-top: 3px; }
-	.cite-pill {
-		display: inline-grid; place-items: center; min-width: 20px; height: 20px; padding: 0 5px;
-		background: var(--accent-soft); color: var(--accent-bright);
-		font: 600 0.74rem/1 var(--mono); flex-shrink: 0;
-	}
+	.cite-pill { flex-shrink: 0; }
 	.hits { display: flex; flex-direction: column; gap: 8px; }
 </style>

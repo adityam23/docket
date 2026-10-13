@@ -250,7 +250,7 @@ fn main() {
                 .parse()
                 .expect("localhost URL");
             tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::External(url))
-                .title("docket")
+                .title("Docket")
                 .inner_size(1280.0, 860.0)
                 .build()?;
             Ok(())
