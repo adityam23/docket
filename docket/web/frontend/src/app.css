@@ -150,6 +150,14 @@ code, .mono { font-family: var(--mono); }
 }
 .page-sub { color: var(--text-dim); margin: 0; max-width: 68ch; font-size: var(--fs-normal); }
 
+/* Numbered citation pill — answers, the Explain drawer's source list. */
+.cite-pill {
+	display: inline-grid; place-items: center; min-width: 19px; height: 19px; padding: 0 4px;
+	background: var(--accent-soft); color: var(--accent-bright); border-radius: 2px;
+	font: 600 0.72rem/1 var(--mono); vertical-align: baseline; margin: 0 1px;
+	cursor: default;
+}
+
 /* ALL-CAPS small utility label — the counterpoint to large lowercase display. */
 .caps {
 	font-size: 0.72rem;

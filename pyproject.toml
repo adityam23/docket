@@ -1,7 +1,7 @@
 [project]
 name = "docket"
 version = "0.0.1"
-description = "Local RAG engine for long documents: hybrid retrieval, cross-encoder rerank, grounded generation, evaluated on FinanceBench."
+description = "Self-hosted research assistant for SEC filings: answers cited to the exact filing page, from a local model."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "GPL-3.0-only" }
