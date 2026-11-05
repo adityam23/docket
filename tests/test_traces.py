@@ -167,6 +167,7 @@ def test_collector_build_record():
         citations = [Citation(doc_id="d", page=1, quote="q")]
         queries = ["q1", "q2"]
         detail = None
+        calculations: list = []
 
     col = TraceCollector("q1", now="2026-08-19T12:00:00+00:00")
     col("plan", {"path": "qa"})
