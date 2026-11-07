@@ -42,6 +42,8 @@ release/
 .claude/
 .serena/
 .cursor/
+.opencode/
+.pi/
 .aider*
 node_modules/
 
