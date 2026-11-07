@@ -82,7 +82,9 @@
 
 		<!-- Trust summary — the ONLY place the triad appears -->
 		<Tile href="/observability" label="trust" size="s-medium" flipKey={trust.total + ':' + trust.high + ':' + trust.low}>
-			{#if trust.total}
+			{#if trust.total && trust.total === trust.unknown}
+				<div class="tile-sub">No reliability scores yet — the engine isn't returning token logprobs for the current model.</div>
+			{:else if trust.total}
 				<div class="trust-bars">
 					{#each [['high', trust.high], ['medium', trust.medium], ['low', trust.low], ['unknown', trust.unknown]] as [k, v]}
 						{#if v}

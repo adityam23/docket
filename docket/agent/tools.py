@@ -6,6 +6,7 @@ and equally callable from the CLI, the web app, or a LangGraph node.
     compare_across_docs diff a metric/claim across filings
     extract_table       pull a structured table from a doc  (LLM-backed; roadmap)
     compute_metric      deterministic financial metric from extracted fields
+    calculate           safe arithmetic over a model-written expression
     aggregate           deterministic sum/mean/min/max/count over cited values
     cite_page           resolve an answer span to an exact source citation
     generate_report     assemble the structured, cited report
@@ -13,6 +14,9 @@ and equally callable from the CLI, the web app, or a LangGraph node.
 
 from __future__ import annotations
 
+import ast
+import math
+import operator
 import re
 from typing import TYPE_CHECKING
 
@@ -27,6 +31,7 @@ TOOL_NAMES = (
     "compare_across_docs",
     "extract_table",
     "compute_metric",
+    "calculate",
     "aggregate",
     "cite_page",
     "generate_report",
@@ -71,6 +76,59 @@ def compute_metric(name: str, **fields: float) -> float:
     if n == "delta":
         return fields["current"] - fields["previous"]
     raise ValueError(f"unknown metric: {name}")
+
+
+_CALC_OPS = {
+    ast.Add: operator.add, ast.Sub: operator.sub,
+    ast.Mult: operator.mul, ast.Div: operator.truediv,
+    ast.Mod: operator.mod, ast.Pow: operator.pow,
+}
+_CALC_UNARY = {ast.UAdd: operator.pos, ast.USub: operator.neg}
+_CALC_MAX_CHARS = 300
+_CALC_MAX_EXPONENT = 64  # bounds ``**`` so one expression can't stall the process
+# Normalisations for how models write figures: thousands separators
+# (``23,601``), currency signs, and typographic operators.
+_THOUSANDS = re.compile(r"(?<=\d),(?=\d{3}(?!\d))")
+_CALC_GLYPHS = str.maketrans({"$": None, "\u2212": "-", "\u00d7": "*", "\u00f7": "/"})
+
+
+def calculate(expression: str) -> float:
+    """Evaluate a model-written arithmetic expression deterministically.
+
+    Keeps arithmetic OUT of the LLM (Q16) for free-form QA, the way
+    ``compute_metric``/``aggregate`` do for their paths. The expression is
+    parsed with the stdlib ``ast`` and only number literals, ``+ - * / % **``,
+    unary sign and parentheses are evaluated -- no names, calls or attributes,
+    so model output can never reach ``eval``. Raises ``ValueError`` for
+    anything else (or a non-finite result) and ``ZeroDivisionError`` as usual.
+    """
+    if len(expression) > _CALC_MAX_CHARS:
+        raise ValueError(f"expression longer than {_CALC_MAX_CHARS} characters")
+    text = _THOUSANDS.sub("", expression.translate(_CALC_GLYPHS)).strip()
+    try:
+        tree = ast.parse(text, mode="eval")
+    except SyntaxError as e:
+        raise ValueError(f"not an arithmetic expression: {expression!r}") from e
+
+    def ev(node: ast.AST) -> float:
+        if isinstance(node, ast.Constant) and type(node.value) in (int, float):
+            return float(node.value)
+        if isinstance(node, ast.UnaryOp) and type(node.op) in _CALC_UNARY:
+            return _CALC_UNARY[type(node.op)](ev(node.operand))
+        if isinstance(node, ast.BinOp) and type(node.op) in _CALC_OPS:
+            left, right = ev(node.left), ev(node.right)
+            if isinstance(node.op, ast.Pow) and abs(right) > _CALC_MAX_EXPONENT:
+                raise ValueError(f"exponent above {_CALC_MAX_EXPONENT}")
+            return _CALC_OPS[type(node.op)](left, right)
+        raise ValueError(f"unsupported element in {expression!r}")
+
+    try:
+        value = ev(tree.body)
+    except OverflowError as e:
+        raise ValueError("result out of range") from e
+    if isinstance(value, complex) or not math.isfinite(value):
+        raise ValueError("result is not a finite number")
+    return value
 
 
 AGG_OPS = ("sum", "mean", "min", "max", "count")
@@ -194,6 +252,7 @@ def build_tools(retriever: Retriever) -> dict:
         "compare_across_docs": lambda query, k=5: compare_across_docs(retriever, query, k=k),
         "extract_table": lambda query, k=5: extract_table(retriever, query, k=k),
         "compute_metric": compute_metric,
+        "calculate": calculate,
         "aggregate": aggregate,
         "cite_page": cite_page,
         "generate_report": generate_report,

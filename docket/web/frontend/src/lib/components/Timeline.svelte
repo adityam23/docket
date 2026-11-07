@@ -6,6 +6,7 @@
 	// show verbatim prompts / context / hits. Monochrome rail; the accent marks
 	// model-touching steps.
 	import { stepMeta, reliability } from '$lib/format.js';
+	import CalcList from '$lib/components/CalcList.svelte';
 	import Chip from '$lib/components/Chip.svelte';
 	import HitCard from '$lib/components/HitCard.svelte';
 	import Icon from '$lib/components/Icon.svelte';
@@ -24,6 +25,7 @@
 		if (Array.isArray(s.hits) && s.hits.length) return true;
 		if (Array.isArray(s.messages) && s.messages.length) return true;
 		if (Array.isArray(s.items) && s.items.length) return true;
+		if (Array.isArray(s.calculations) && s.calculations.length) return true;
 		if (typeof s.context === 'string' && s.context) return true;
 		if (typeof s.text === 'string' && s.text) return true;
 		return false;
@@ -39,6 +41,8 @@
 		else if (Array.isArray(s.hits)) bits.push(`${s.hits.length} chunks`);
 		if (typeof s.items === 'number') bits.push(`${s.items} values`);
 		else if (Array.isArray(s.items)) bits.push(`${s.items.length} values`);
+		if (typeof s.calculations === 'number') bits.push(`${s.calculations} calculations`);
+		else if (Array.isArray(s.calculations)) bits.push(`${s.calculations.length} calculations`);
 		if (typeof s.chars === 'number') bits.push(`${s.chars} chars`);
 		return bits.join(' · ');
 	}
@@ -85,6 +89,9 @@
 									<li><span class="mono">{it.value}{it.unit}</span> — {it.label}</li>
 								{/each}
 							</ul>
+						{/if}
+						{#if Array.isArray(s.calculations) && s.calculations.length}
+							<CalcList calculations={s.calculations} />
 						{/if}
 						{#if typeof s.text === 'string' && s.text && !Array.isArray(s.messages)}
 							<pre>{s.text}</pre>

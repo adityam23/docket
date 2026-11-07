@@ -593,25 +593,24 @@ def test_ingest_paths_between_documents_seam_fires_once_per_document(monkeypatch
     pipe.ingest_paths(["/x/a.pdf"], settings=s, corpus=Corpus())
 
 
-def test_ingest_doc_failure_persists_earlier_lineage_rolls_back_and_continues(monkeypatch, tmp_path):
-    # Contract D3: a document whose POST fails mid-way is recorded "failed"
-    # with NO lineage written, its already-posted chunks are best-effort
-    # DELETEd (so a retry doesn't 409), and the batch continues -- an EARLIER
-    # successful document's lineage must already be on disk, not just held in
-    # memory until some final batch-wide save.
+def test_ingest_doc_failure_persists_earlier_lineage_and_continues(monkeypatch, tmp_path):
+    # Contract D3: a document whose POST fails is recorded "failed" with NO
+    # lineage written, and the batch continues -- an EARLIER successful
+    # document's lineage must already be on disk, not just held in memory until
+    # some final batch-wide save. The engine-side write is all-or-nothing per
+    # document (``post_documents``), so the failed document left nothing behind.
     import docket.ingest.pipeline as pipe
 
     pages_by_doc = {
-        "a": [{"page": 1, "text": "alpha"}],                  # 1 chunk -> posts fine
+        "a": [{"page": 1, "text": "alpha"}],
         "b": [{"page": 1, "text": "bravo charlie delta"}],     # 3 chunks @ words=1
-        "c": [{"page": 1, "text": "echo"}],                    # 1 chunk -> posts fine
+        "c": [{"page": 1, "text": "echo"}],
     }
     monkeypatch.setattr(
         pipe, "pdf_to_pages",
         lambda path: pages_by_doc[pipe.doc_id_of(path)],
     )
-    # Calls in order: a#0 (1,ok) b#0 (2,ok) b#1 (3,FAILS) -- b#2 never attempted.
-    engine = FakeEngine(fail_post_at=3)
+    engine = FakeEngine(fail_post_at=2)  # one post_documents call per document: b fails
     monkeypatch.setattr(pipe, "get_provider", lambda s: engine)
 
     s = Settings(index_dir=str(tmp_path), chunk_words=1, chunk_overlap=0)
@@ -629,9 +628,27 @@ def test_ingest_doc_failure_persists_earlier_lineage_rolls_back_and_continues(mo
     persisted = Corpus.load(s.index_dir)
     assert set(persisted.doc_ids()) == {"a", "c"}
 
-    # b's one already-posted chunk was best-effort cleaned up engine-side.
-    assert ("docket", "b#0") in engine.deleted
-    assert "b#1" not in [cid for _, cid in engine.deleted]  # the failing chunk itself was never written
+    # b wrote nothing engine-side.
+    assert not [cid for _, cid, _ in engine.posted if cid.startswith("b#")]
+
+
+def test_ingest_posts_each_document_as_one_batch(monkeypatch, tmp_path):
+    # M3: a document's chunks go out in ONE all-or-nothing post_documents call,
+    # not one POST per chunk.
+    import docket.ingest.pipeline as pipe
+
+    monkeypatch.setattr(
+        pipe, "pdf_to_pages", lambda path: [{"page": 1, "text": "one two three four"}],
+    )
+    engine = FakeEngine()
+    calls = []
+    real = engine.post_documents
+    engine.post_documents = lambda coll, docs: calls.append(len(docs)) or real(coll, docs)
+    monkeypatch.setattr(pipe, "get_provider", lambda s: engine)
+
+    s = Settings(index_dir=str(tmp_path), chunk_words=1, chunk_overlap=0)
+    pipe.ingest_paths(["/x/a.pdf"], settings=s, corpus=Corpus())
+    assert calls == [4]
 
 
 def test_load_samples_skips_already_indexed_and_does_not_repost(tmp_path, monkeypatch):
@@ -676,3 +693,72 @@ def test_generate_report_and_render():
     assert "# Acme 10-K" in md
     assert "🟢" in md  # reliability banner
     assert "acme-10k" in md
+
+
+def test_ingest_sweeps_a_filings_lineage_less_leftovers_before_posting(monkeypatch, tmp_path):
+    # A documents:batch POST that times out client-side may still commit
+    # engine-side, leaving the filing's ids with no lineage. The retry must
+    # delete exactly those (including stale higher-numbered chunks) and nothing
+    # else: not lineage-backed chunks, not other filings whose ids merely share
+    # a prefix.
+    import docket.ingest.pipeline as pipe
+
+    monkeypatch.setattr(pipe, "pdf_to_pages", lambda path: [{"page": 1, "text": "alpha bravo"}])
+    corpus = Corpus()
+    kept = chunk_pages([{"page": 1, "text": "kept"}], doc_id="b", words=1, overlap=0)
+    corpus.add(kept)
+    leftovers = chunk_pages(
+        [{"page": 1, "text": "one two three four five six seven eight"}],
+        doc_id="a", words=1, overlap=0,
+    )
+    neighbours = chunk_pages([{"page": 1, "text": "x"}], doc_id="a_2022", words=1, overlap=0)
+    neighbours += chunk_pages([{"page": 1, "text": "y"}], doc_id="ab", words=1, overlap=0)
+    engine = FakeEngine(leftovers + kept + neighbours)
+    listed = []
+    real_list = engine.list_documents
+    engine.list_documents = lambda coll: listed.append(coll) or real_list(coll)
+    monkeypatch.setattr(pipe, "get_provider", lambda s: engine)
+
+    s = Settings(index_dir=str(tmp_path), chunk_words=1, chunk_overlap=0)
+    events = []
+    pipe.ingest_paths(
+        ["/x/a.pdf"], settings=s, corpus=corpus,
+        on_event=lambda d, st, i: events.append((d, st, i)),
+    )
+
+    assert sorted(cid for _, cid in engine.deleted) == sorted(ch.chunk_id for ch in leftovers)
+    assert ("a", "post", {"chunks": 2, "swept": 8}) in events
+    assert ("a", "done", {"chunks": 2}) in events
+    assert listed == ["docket"]  # listed once for the run
+
+
+def test_ingest_run_that_posts_nothing_never_lists_the_collection(monkeypatch, tmp_path):
+    import docket.ingest.pipeline as pipe
+
+    corpus = Corpus()
+    corpus.add(chunk_pages([{"page": 1, "text": "kept"}], doc_id="a", words=1, overlap=0))
+    engine = FakeEngine()
+    engine.list_documents = lambda coll: pytest.fail("listed a collection with nothing to post")
+    monkeypatch.setattr(pipe, "get_provider", lambda s: engine)
+
+    pipe.ingest_paths(["/x/a.pdf"], settings=Settings(index_dir=str(tmp_path)), corpus=corpus)
+
+
+def test_a_failing_sweep_fails_only_that_document(monkeypatch, tmp_path):
+    import docket.ingest.pipeline as pipe
+
+    monkeypatch.setattr(pipe, "pdf_to_pages", lambda path: [{"page": 1, "text": "alpha"}])
+    engine = FakeEngine()
+
+    def unreachable(coll):
+        raise RuntimeError("listing failed")
+
+    engine.list_documents = unreachable
+    monkeypatch.setattr(pipe, "get_provider", lambda s: engine)
+    events = []
+    corpus = pipe.ingest_paths(
+        ["/x/a.pdf"], settings=Settings(index_dir=str(tmp_path)), corpus=Corpus(),
+        on_event=lambda d, st, i: events.append((d, st)),
+    )
+    assert ("a", "failed") in events
+    assert corpus.doc_ids() == [] and engine.posted == []

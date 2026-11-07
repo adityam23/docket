@@ -130,6 +130,7 @@ export const STEP = {
 	context: { label: 'Assemble context', icon: 'layers', tone: 'neutral' },
 	prompt: { label: 'Prompt model', icon: 'pen', tone: 'accent' },
 	response: { label: 'Model response', icon: 'spark', tone: 'accent' },
+	calc: { label: 'Calculate', icon: 'calc', tone: 'info' },
 	refine: { label: 'Re-query', icon: 'refresh', tone: 'warn' },
 	extract_prompt: { label: 'Extraction prompt', icon: 'pen', tone: 'accent' },
 	extract_response: { label: 'Extraction output', icon: 'spark', tone: 'accent' },

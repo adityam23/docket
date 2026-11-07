@@ -2,23 +2,24 @@
 (cutover contract, 2026-09-10) — parameterise the client, never fork it.
 
 Every call is also wrapped with the engine's phase coordinator (residency
-contract D5/D6, see ``docket/phase.py``): generation enters CHAT; every
-retrieval/ingest call (embed, rerank, collection search, document post/
-delete, collection ensure/delete) enters RETRIEVAL. This is the ONE place
-that wrapping happens (CLAUDE.md reusability) -- every caller through
-``get_provider`` gets phase-correctness and ingest-preemption at chunk
-granularity for free, with no call site responsible for remembering to ask
-for it. ``health``/``ocr`` enter no phase: health must answer regardless of
-the active profile (it's a liveness probe), and OCR's slot isn't pinned in
-either phase profile today -- an open question posed to mettle (see
-``QUESTIONS from mettle.md``), not something docket can resolve unilaterally."""
+contract D5/D6 and Q11, see ``docket/phase.py``): generation enters CHAT;
+query-time calls (embed, rerank, collection search) enter RETRIEVAL; writes
+and OCR (collection ensure/delete, document post/list/delete, ``/v1/ocr``)
+enter INGEST, mettle's embed + OCR profile. This is the ONE place that
+wrapping happens (CLAUDE.md reusability) -- every caller through
+``get_provider`` gets phase-correctness and ingest-preemption for free, with
+no call site responsible for remembering to ask for it. Ingest preempts at
+document granularity: one filing is one ``post_documents`` call, held in
+INGEST for its whole batched POST (and each scanned page's OCR call is its
+own safe point). ``health`` enters no phase: a liveness probe must answer
+regardless of the active profile."""
 
 from __future__ import annotations
 
 from ..config import Settings
 from ..engine import resolve_model
 from ..phase import Phase, PhaseCoordinator, get_phase_coordinator
-from .base import Provider
+from .base import EngineDocument, Provider
 from .openai_compat import OpenAICompatProvider
 
 
@@ -54,7 +55,8 @@ class PhasedProvider:
         return self._inner.health()
 
     def ocr(self, image_b64: str, instruction: str | None = None) -> str:
-        return self._inner.ocr(image_b64, instruction)
+        with self._coordinator.enter(Phase.INGEST):
+            return self._inner.ocr(image_b64, instruction)
 
     def chat(self, messages: list[dict], **kw):
         with self._coordinator.enter(Phase.CHAT):
@@ -69,21 +71,23 @@ class PhasedProvider:
             return self._inner.rerank(query, documents)
 
     def ensure_collection(self, collection: str) -> None:
-        with self._coordinator.enter(Phase.RETRIEVAL):
+        with self._coordinator.enter(Phase.INGEST):
             return self._inner.ensure_collection(collection)
 
     def delete_collection(self, collection: str) -> bool:
-        with self._coordinator.enter(Phase.RETRIEVAL):
+        with self._coordinator.enter(Phase.INGEST):
             return self._inner.delete_collection(collection)
 
-    def post_document(
-        self, collection: str, doc_id: str, text: str, metadata: dict[str, str] | None = None
-    ) -> list[str]:
-        with self._coordinator.enter(Phase.RETRIEVAL):
-            return self._inner.post_document(collection, doc_id, text, metadata)
+    def post_documents(self, collection: str, documents: list[EngineDocument]) -> list[str]:
+        with self._coordinator.enter(Phase.INGEST):
+            return self._inner.post_documents(collection, documents)
+
+    def list_documents(self, collection: str) -> list[dict]:
+        with self._coordinator.enter(Phase.INGEST):
+            return self._inner.list_documents(collection)
 
     def delete_document(self, collection: str, doc_id: str) -> bool:
-        with self._coordinator.enter(Phase.RETRIEVAL):
+        with self._coordinator.enter(Phase.INGEST):
             return self._inner.delete_document(collection, doc_id)
 
     def collection_search(
@@ -110,6 +114,7 @@ def get_provider(settings: Settings) -> Provider:
         rerank_model=settings.rerank_model,
         api_key=settings.engine_key,
         timeout_s=settings.request_timeout_s,
+        batch_timeout_s=settings.ingest_batch_timeout_s,
         resolve_model=lambda m: resolve_model(settings, m),
     )
     return PhasedProvider(inner, get_phase_coordinator(settings))

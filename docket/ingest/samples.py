@@ -22,7 +22,7 @@ from typing import Optional
 
 from ..config import Settings, load_settings
 from .index import Corpus
-from .pipeline import StageEvent, _emitter, _ingest_doc, _ready_provider
+from .pipeline import OrphanSweep, StageEvent, _emitter, _ingest_doc, _ready_provider
 
 
 def _sample_docs() -> list[dict]:
@@ -52,6 +52,7 @@ def load_samples(
     seen: set[str] = set(c.doc_ids())
     emit = _emitter(on_event)
     provider = _ready_provider(s)  # one provider + one ensure_collection per run
+    sweep = OrphanSweep(provider, s.engine_collection, c)
 
     for doc in _sample_docs():
         doc_id = doc["doc_id"]
@@ -63,7 +64,7 @@ def load_samples(
             doc_id, doc["pages"],
             source=source, meta={}, corpus=c,
             provider=provider, collection=s.engine_collection, settings=s,
-            emit=emit, empty_reason="empty sample",
+            emit=emit, sweep=sweep, empty_reason="empty sample",
         )
         if outcome == "done":
             seen.add(doc_id)

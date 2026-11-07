@@ -113,7 +113,7 @@ class Settings(BaseSettings):
 
     # Engine phase coordination (residency contract D5): mettle's 6 GB config
     # can't keep embed+rerank and the chat generator resident together, so it
-    # ships two profiles and docket switches between them per phase via the
+    # ships separate profiles and docket switches between them per phase via the
     # ONE coordinator (docket/phase.py), applied per-call by every provider
     # built through providers/router.py. Empty ("") for EITHER name disables
     # switching entirely -- a single-profile engine, coordinator is a no-op.
@@ -122,6 +122,10 @@ class Settings(BaseSettings):
     # decision, not a Settings-page knob (config_write.WRITABLE_FIELDS).
     engine_retrieval_profile: str = "retrieval"
     engine_chat_profile: str = "chat"
+    # Document writes and scanned-page OCR (Q11): mettle's `ingest` profile
+    # holds the embedder + OCR model, which can't fit beside the reranker.
+    # Empty runs ingest in the retrieval profile (no OCR slot there).
+    engine_ingest_profile: str = "ingest"
     # How long a phase switch (PUT + poll /engine/ready + verify /engine/status
     # active/!switching) may take before the coordinator gives up and raises
     # loudly (docket/engine.py EngineSwitchError) instead of hanging forever.
@@ -130,6 +134,10 @@ class Settings(BaseSettings):
     engine_switch_timeout_s: float = Field(120.0, gt=0)
 
     request_timeout_s: float = Field(120.0, gt=0)
+    # A filing's documents:batch POST embeds every chunk server-side before it
+    # answers, so it gets its own ceiling (a 780-chunk 10-K overran the shared
+    # 120 s). Env-only, like the other ingest-plumbing knobs.
+    ingest_batch_timeout_s: float = Field(900.0, gt=0)
 
     # Ingest/retrieval knobs. The persisted corpus (chunk lineage + doc dedup +
     # job state, NO chunk text — display text comes back from engine hits)
@@ -162,7 +170,7 @@ class Settings(BaseSettings):
         contract), with one exception: empty is the documented opt-out that
         disables phase switching (docket/phase.py), so it can't share the
         field's own ``pattern=`` (which requires 1-128 chars)."""
-        for field in ("engine_retrieval_profile", "engine_chat_profile"):
+        for field in ("engine_retrieval_profile", "engine_chat_profile", "engine_ingest_profile"):
             value = getattr(self, field)
             if value and not re.fullmatch(_COLLECTION_NAME_PATTERN, value):
                 raise ValueError(
