@@ -1,7 +1,7 @@
 """Offline tests that the phase coordinator is actually wired into the engine
-call path (ticket D5 point 3/5): ``providers.router.PhasedProvider`` enters
-CHAT for ``chat`` and RETRIEVAL for every retrieval/ingest call, ``health``/
-``ocr`` enter neither, and the agent's ``answer()`` flow produces the minimal
+call path (ticket D5 point 3/5, Q11): ``providers.router.PhasedProvider``
+enters CHAT for ``chat``, RETRIEVAL for query-time calls, INGEST for writes
+and OCR, ``health`` enters none, and the agent's ``answer()`` flow produces the minimal
 phase-switch sequence for a plain QA ask, the aggregate path, and an ask that
 triggers one re-query hop.
 
@@ -55,7 +55,7 @@ def test_chat_enters_chat_phase():
     assert coord.entries == [Phase.CHAT]
 
 
-def test_retrieval_calls_enter_retrieval_phase():
+def test_query_calls_enter_retrieval_and_writes_enter_ingest():
     chunks = acme_chunks()
     provider, coord, engine = _wrapped(chunks, rank="all", rerank_fn=lambda q, d: [1.0] * len(d))
     # FakeEngine (tests/fakes.py) doesn't model embed() -- it's a thin fake of
@@ -64,22 +64,26 @@ def test_retrieval_calls_enter_retrieval_phase():
     engine.embed = lambda texts: [[0.0]] * len(texts)
     engine.delete_collection = lambda collection: True
 
+    engine.ocr = lambda image_b64, instruction=None: "text"  # not modeled by FakeEngine
+
     provider.embed(["x"])
     provider.rerank("q", ["a", "b"])
-    provider.ensure_collection("docket")
     provider.collection_search("docket", "revenue", mode="hybrid", k=5)
+    assert coord.entries == [Phase.RETRIEVAL] * 3
+
+    coord.entries.clear()
+    provider.ensure_collection("docket")
     provider.post_documents("docket", [EngineDocument("doc#1", "text", {})])
+    provider.list_documents("docket")
     provider.delete_document("docket", "doc#1")
     provider.delete_collection("docket")
-
-    assert coord.entries == [Phase.RETRIEVAL] * 7
-
-
-def test_health_and_ocr_enter_no_phase():
-    provider, coord, engine = _wrapped(acme_chunks())
-    engine.ocr = lambda image_b64, instruction=None: "text"  # not modeled by FakeEngine
-    provider.health()
     provider.ocr("base64==", instruction=None)
+    assert coord.entries == [Phase.INGEST] * 6
+
+
+def test_health_enters_no_phase():
+    provider, coord, _ = _wrapped(acme_chunks())
+    provider.health()
     assert coord.entries == []
 
 

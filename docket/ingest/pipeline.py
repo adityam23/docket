@@ -28,6 +28,7 @@ import threading
 from typing import Callable, Optional
 
 from ..config import Settings, load_settings
+from ..phase import Phase, provider_phase
 from ..providers.base import EngineDocument, Provider
 from ..providers.router import get_provider
 from .chunk import FILING_FIELDS, Chunk, chunk_pages
@@ -191,8 +192,11 @@ def _ingest_doc(
         for ch in chunks
     ]
     try:
-        emit(doc_id, "post", chunks=len(chunks), swept=sweep(doc_id))
-        provider.post_documents(collection, documents)
+        # One logical block: the sweep's list/deletes and the POST share one
+        # INGEST hold, so a question can't wedge a profile flip between them.
+        with provider_phase(provider, Phase.INGEST):
+            emit(doc_id, "post", chunks=len(chunks), swept=sweep(doc_id))
+            provider.post_documents(collection, documents)
     except Exception as e:  # noqa: BLE001 - one bad document must not sink the batch (D3)
         emit(doc_id, "failed", reason=str(e))
         return "failed"
@@ -238,10 +242,10 @@ def ingest_paths(
     Resolved (D5/phase coordinator ticket): this seam is kept as a no-op
     hook, deliberately NOT wired to a pause/preempt behaviour. Ask-preempts-
     ingest is already provided per document by ``providers/router.py``'s
-    per-call phase wrapping -- each document's ``post_documents`` call
-    enters the RETRIEVAL phase via the coordinator, and a waiting chat
-    request already blocks new RETRIEVAL entrants from the next document's
-    POST (see ``docket/phase.py``). Pausing the whole batch here on top of that would
+    per-call phase wrapping -- each document's sweep+POST block (and each
+    scanned page's OCR call) enters the INGEST phase via the coordinator, and
+    a waiting question (RETRIEVAL or CHAT) already blocks new INGEST entrants
+    from the next document (see ``docket/phase.py``). Pausing the whole batch here on top of that would
     be a second, coarser preemption mechanism for the same job -- CLAUDE.md:
     one concept, one implementation. The seam stays for a genuinely different
     future need (e.g. an operator-initiated "pause this ingest job" button),

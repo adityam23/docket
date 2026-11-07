@@ -1,8 +1,9 @@
-"""ONE phase coordinator for mettle's two-profile engine (residency contract
-D5/D6): the reference 6 GB config can't keep embed+rerank and the chat
-generator resident together, so it ships two profiles -- ``retrieval``
-(embed + rerank) and ``chat`` (the generator) -- and docket switches between
-them per phase. Every engine call enters the phase it needs through this
+"""ONE phase coordinator for mettle's multi-profile engine (residency contract
+D5/D6, Q11): the reference 6 GB card can't keep the embedder, reranker, OCR
+model and chat generator resident together, so mettle ships three profiles --
+``ingest`` (embed + OCR: document writes and scanned-page OCR), ``retrieval``
+(embed + rerank: search) and ``chat`` (the generator) -- and docket switches
+between them per phase. Every engine call enters the phase it needs through this
 single process-wide coordinator (see ``providers/router.py``'s per-call
 wrapping) -- never a second, ad hoc switching path (CLAUDE.md reusability).
 
@@ -15,13 +16,17 @@ Semantics (operator-decided, 2026-10-06/07):
   active/!switching, bounded by ``Settings.engine_switch_timeout_s`` ->
   :class:`docket.engine.EngineSwitchError` on timeout -- fail loud, never a
   silent indefinite wait).
-- CHAT waiters have priority: while any chat request is waiting to switch
-  in, new RETRIEVAL entrants block. This is what lets an ``ask`` preempt a
-  running ingest at the next safe point (the next per-document engine call)
-  instead of queuing behind the whole batch.
+- Priority CHAT > RETRIEVAL > INGEST: while any request of a higher phase is
+  waiting to switch in, new entrants of a lower phase block. A user question
+  is a RETRIEVAL step then a CHAT step, so this is what lets an ``ask``
+  preempt a running ingest at the next safe point (the next per-document or
+  per-OCR-page engine call) instead of queuing behind the whole batch, and
+  keeps a question's own search from being re-opened to ingest traffic.
 - Empty profile names (``Settings.engine_retrieval_profile`` /
   ``engine_chat_profile``) disable switching entirely (a single-profile
-  engine): every :meth:`PhaseCoordinator.enter` is then a no-op.
+  engine): every :meth:`PhaseCoordinator.enter` is then a no-op. An empty
+  ``engine_ingest_profile`` runs INGEST in the retrieval profile (a
+  two-profile engine with no separate ingest/OCR profile).
 - "Already in the right profile at startup" is read once, lazily, from
   ``/engine/status`` -- never an unconditional switch on the very first call.
 - Nested entry of the SAME phase by the SAME thread (an outer caller already
@@ -68,13 +73,18 @@ from .engine import read_status_meta, switch_profile
 
 
 class Phase(str, Enum):
+    INGEST = "ingest"
     RETRIEVAL = "retrieval"
     CHAT = "chat"
 
 
+# Higher preempts lower (see the module docstring): interactive work first.
+_PRIORITY = {Phase.INGEST: 0, Phase.RETRIEVAL: 1, Phase.CHAT: 2}
+
+
 class PhaseDeadlockError(RuntimeError):
     """Raised instead of deadlocking: a thread already holding one phase open
-    tried to enter the OTHER phase on the same thread. Only that thread could
+    tried to enter a DIFFERENT phase on the same thread. Only that thread could
     ever drop its own in-flight count to let the switch happen, so the wait
     could never resolve -- this is a caller bug (nest the SAME phase, or
     release the held phase first), not a contention case to wait out."""
@@ -114,7 +124,9 @@ class PhaseCoordinator:
         # None = not yet checked (triggers the one lazy /engine/status read).
         self._current: str | None = None
         self._in_flight = 0
-        self._chat_waiters = 0
+        # Outermost entrants currently inside _acquire, per phase -- what the
+        # priority rule checks (a higher phase waiting blocks lower entrants).
+        self._waiters = {p: 0 for p in Phase}
         # True while a status probe or a real switch's HTTP call is running
         # OUTSIDE the lock (fix: never hold the lock across network I/O).
         # Every other enter() waits on this exactly like it waits on
@@ -137,11 +149,16 @@ class PhaseCoordinator:
         )
 
     def _target(self, phase: Phase) -> str:
-        return (
-            self._settings.engine_retrieval_profile
-            if phase is Phase.RETRIEVAL
-            else self._settings.engine_chat_profile
-        )
+        s = self._settings
+        if phase is Phase.CHAT:
+            return s.engine_chat_profile
+        if phase is Phase.INGEST and s.engine_ingest_profile:
+            return s.engine_ingest_profile
+        return s.engine_retrieval_profile
+
+    def _outranked(self, phase: Phase) -> bool:
+        """A higher-priority phase has an entrant waiting (caller holds the lock)."""
+        return any(n and _PRIORITY[p] > _PRIORITY[phase] for p, n in self._waiters.items())
 
     def _depth(self) -> dict:
         d = getattr(self._tls, "depth", None)
@@ -188,10 +205,8 @@ class PhaseCoordinator:
             )
 
         target = self._target(phase)
-        is_chat = phase is Phase.CHAT
         with self._cond:
-            if is_chat:
-                self._chat_waiters += 1
+            self._waiters[phase] += 1
         try:
             while True:
                 probe = False
@@ -211,10 +226,11 @@ class PhaseCoordinator:
                         self._switching = True
                         probe = True
                     elif self._current == target:
-                        if not is_chat and self._chat_waiters > 0:
-                            # A chat request is waiting for its zero-in-flight
-                            # window to switch in -- a fresh retrieval
-                            # entrant must not keep reopening that window.
+                        if self._outranked(phase):
+                            # A higher-priority request is waiting for its
+                            # zero-in-flight window to switch in -- a fresh
+                            # lower-priority entrant must not keep reopening
+                            # that window.
                             self._cond.wait()
                             continue
                         self._in_flight += 1
@@ -261,10 +277,9 @@ class PhaseCoordinator:
                     self._switching = False
                     self._cond.notify_all()
         finally:
-            if is_chat:
-                with self._cond:
-                    self._chat_waiters -= 1
-                    self._cond.notify_all()
+            with self._cond:
+                self._waiters[phase] -= 1
+                self._cond.notify_all()
 
     def _release(self, phase: Phase) -> None:
         depth = self._depth()

@@ -447,3 +447,81 @@ def test_unknown_active_profile_switches_instead_of_reprobing_forever():
             pass
     assert probes == [1]
     assert switches == ["chat"]
+
+
+# -- ingest phase (Q11) ------------------------------------------------------
+
+
+def test_ingest_enters_the_ingest_profile():
+    coord, calls = _coordinator(initial_active="retrieval")
+    with coord.enter(Phase.INGEST):
+        pass
+    with coord.enter(Phase.RETRIEVAL):
+        pass
+    assert calls == ["ingest", "retrieval"]
+
+
+def test_empty_ingest_profile_runs_ingest_in_the_retrieval_profile():
+    coord, calls = _coordinator(
+        initial_active="retrieval", settings=_settings(engine_ingest_profile=""),
+    )
+    with coord.enter(Phase.INGEST):
+        pass
+    with coord.enter(Phase.RETRIEVAL):
+        pass
+    assert calls == []  # a two-profile engine: ingest and search share one profile
+
+
+def test_waiting_question_search_blocks_new_ingest_entrants():
+    # A question's RETRIEVAL step outranks ingest, so a running ingest is
+    # preempted at its next call, not after the whole batch.
+    coord, calls = _coordinator(initial_active="ingest")
+
+    entered_ingest = threading.Event()
+    release_ingest = threading.Event()
+
+    def hold_ingest():
+        with coord.enter(Phase.INGEST):
+            entered_ingest.set()
+            release_ingest.wait(timeout=5.0)
+
+    t_i1 = threading.Thread(target=hold_ingest, daemon=True)
+    t_i1.start()
+    assert entered_ingest.wait(timeout=2.0)
+
+    search_entered = threading.Event()
+    search_released = threading.Event()
+
+    def do_search():
+        with coord.enter(Phase.RETRIEVAL):
+            search_entered.set()
+            search_released.wait(timeout=5.0)
+
+    t_s = threading.Thread(target=do_search, daemon=True)
+    t_s.start()
+    time.sleep(0.2)
+    assert not search_entered.is_set()
+
+    next_ingest_entered = threading.Event()
+
+    def next_ingest():
+        with coord.enter(Phase.INGEST):
+            next_ingest_entered.set()
+
+    t_i2 = threading.Thread(target=next_ingest, daemon=True)
+    t_i2.start()
+    time.sleep(0.3)
+    assert not next_ingest_entered.is_set(), "new ingest entrant jumped ahead of a waiting search"
+
+    release_ingest.set()
+    t_i1.join(timeout=5.0)
+    assert search_entered.wait(timeout=5.0)
+    assert calls == ["retrieval"]
+    time.sleep(0.2)
+    assert not next_ingest_entered.is_set()
+
+    search_released.set()
+    t_s.join(timeout=5.0)
+    assert next_ingest_entered.wait(timeout=5.0)
+    t_i2.join(timeout=5.0)
+    assert calls == ["retrieval", "ingest"]
