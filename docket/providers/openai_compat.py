@@ -5,6 +5,7 @@ collection lifecycle) all ride this one base URL; parameterise, never fork
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Callable
 from urllib.parse import quote
@@ -12,7 +13,7 @@ from urllib.parse import quote
 import httpx
 
 from ..auth import bearer_headers
-from .base import ChatResult, SlotUnavailable
+from .base import ChatResult, EngineDocument, SlotUnavailable
 
 # Control/NUL bytes (keep \t \n \r) — PDF text extraction (pypdf) leaves stray
 # NULs in real filings, and the backend rejects them ("nul byte found in provided
@@ -25,15 +26,48 @@ def _sanitize(text: str) -> str:
     return _CTRL_BYTES.sub(" ", text)
 
 
+# mettle's ``documents:batch`` caps (M3, 413 above either). The byte budget
+# keeps headroom for the ``{"documents": [...]}`` envelope.
+_BATCH_MAX_DOCS = 1024
+_BATCH_MAX_BYTES = 8 * 1024 * 1024
+_BATCH_ENVELOPE_BYTES = 64
+
+
+def _wire_batches(docs: list[dict]) -> list[list[dict]]:
+    """Greedily pack wire documents into batches under mettle's count and byte
+    caps, preserving order. Each document's size is measured with default
+    ``json.dumps`` (ASCII-escaped, spaced separators) -- an upper bound on
+    what httpx actually sends. A single document over the byte cap can never
+    be sent and raises loudly rather than 413ing on the wire."""
+    budget = _BATCH_MAX_BYTES - _BATCH_ENVELOPE_BYTES
+    batches: list[list[dict]] = []
+    batch: list[dict] = []
+    size = 0
+    for doc in docs:
+        n = len(json.dumps(doc)) + 2  # + ", " separator
+        if n > budget:
+            raise ValueError(f"document {doc['id']!r} is {n} bytes, over the batch cap")
+        if batch and (len(batch) == _BATCH_MAX_DOCS or size + n > budget):
+            batches.append(batch)
+            batch, size = [], 0
+        batch.append(doc)
+        size += n
+    if batch:
+        batches.append(batch)
+    return batches
+
+
 def _path(*segments: str) -> str:
-    """Join URL path segments, percent-encoding each one individually (``safe=""``,
-    so a literal ``/``, ``#`` or ``?`` inside a segment gets encoded too) — the
+    """Join URL path segments, percent-encoding each one individually (so a
+    literal ``/``, ``#`` or ``?`` inside a segment gets encoded too) — the
     ONE place every collection/document call builds its path. Without this, a
     chunk id like ``acme#3`` gets treated by httpx as a URL fragment (DELETE
     silently hits the wrong path), and a hostile collection name like
     ``../../engine/x`` can escape the collections route onto another engine
-    route carrying the same bearer token."""
-    return "/".join(quote(seg, safe="") for seg in segments)
+    route carrying the same bearer token. ``:`` is left literal: it is a legal
+    path character (RFC 3986 pchar), cannot traverse, and mettle's
+    ``documents:batch`` route only matches it unencoded."""
+    return "/".join(quote(seg, safe=":") for seg in segments)
 
 
 def _extract_logprobs(choice: dict) -> list[float] | None:
@@ -79,6 +113,7 @@ class OpenAICompatProvider:
         embed_model: str | None = None,
         rerank_model: str | None = None,
         timeout_s: float = 120.0,
+        batch_timeout_s: float | None = None,
         resolve_model: Callable[[str], str] | None = None,
     ) -> None:
         self.name = name
@@ -87,6 +122,7 @@ class OpenAICompatProvider:
         self._embed_model = embed_model
         self._rerank_model = rerank_model
         self._resolve = resolve_model or (lambda m: m)
+        self._batch_timeout_s = batch_timeout_s or timeout_s
         self._client = httpx.Client(timeout=timeout_s, headers=bearer_headers(api_key))
 
     def _url(self, *segments: str) -> str:
@@ -98,13 +134,16 @@ class OpenAICompatProvider:
         *segments: str,
         json: dict | None = None,
         ok: tuple[int, ...] = (),
+        timeout: float | None = None,
     ) -> httpx.Response:
         """The ONE request path for every /v1 call: build the (encoded) URL,
         send, check for the structured slot-unavailable 503, then raise on any
         other error status -- unless the caller declared it expected via ``ok``
         (e.g. 404 for an idempotent delete, 409 for create-if-absent), in which
-        case the response is handed back as-is for the caller to interpret."""
-        r = self._client.request(method, self._url(*segments), json=json)
+        case the response is handed back as-is for the caller to interpret.
+        ``timeout`` overrides the client-wide timeout for this one call."""
+        kw = {} if timeout is None else {"timeout": timeout}
+        r = self._client.request(method, self._url(*segments), json=json, **kw)
         _raise_on_slot_unavailable(r)
         if r.status_code in ok:
             return r
@@ -192,16 +231,47 @@ class OpenAICompatProvider:
         r = self._send("DELETE", "collections", collection, ok=(404,))
         return r.status_code != 404
 
-    def post_document(
-        self, collection: str, doc_id: str, text: str, metadata: dict[str, str] | None = None
-    ) -> list[str]:
-        """POST one docket chunk as an engine document. Returns the engine's
-        chunk ids (one per posted document under the engine's own chunker)."""
-        r = self._send(
-            "POST", "collections", collection, "documents",
-            json={"id": doc_id, "content": _sanitize(text), "metadata": metadata or {}},
-        )
-        return r.json().get("chunk_ids", [])
+    def post_documents(self, collection: str, documents: list[EngineDocument]) -> list[str]:
+        """POST one docket document's chunks via mettle's all-or-nothing
+        ``documents:batch``, so the whole filing commits or none of it does.
+        A filing over the batch caps is split; if a later batch fails, every
+        earlier (committed) batch is best-effort DELETEd before re-raising, so
+        a retry never 409s on leftovers. The failing batch itself wrote
+        nothing (mettle's guarantee) and is not touched -- on a 409 its ids may
+        belong to an existing, lineage-backed document. The exception is a
+        client-side timeout: mettle may still commit that batch, which is why
+        ingest sweeps a filing's lineage-less ids before (re-)posting it
+        (``pipeline.OrphanSweep``). Batch POSTs use the longer
+        ``batch_timeout_s``. Returns the engine's chunk ids."""
+        wire = [
+            {"id": d.id, "content": _sanitize(d.text), "metadata": d.metadata}
+            for d in documents
+        ]
+        committed: list[str] = []
+        chunk_ids: list[str] = []
+        try:
+            for batch in _wire_batches(wire):
+                r = self._send(
+                    "POST", "collections", collection, "documents:batch",
+                    json={"documents": batch}, timeout=self._batch_timeout_s,
+                )
+                committed.extend(doc["id"] for doc in batch)
+                for row in r.json().get("results", []):
+                    chunk_ids.extend(row.get("chunk_ids", []))
+        except Exception:
+            for doc_id in committed:
+                try:
+                    self.delete_document(collection, doc_id)
+                except Exception:  # noqa: BLE001 - best-effort; the original error wins
+                    pass
+            raise
+        return chunk_ids
+
+    def list_documents(self, collection: str) -> list[dict]:
+        """Every document in a collection as mettle's unpaginated
+        ``[{id, chunk_count, metadata}]`` (M4) -- the engine-side truth that
+        ingest reconciles lineage against."""
+        return self._send("GET", "collections", collection, "documents").json()
 
     def delete_document(self, collection: str, doc_id: str) -> bool:
         r = self._send("DELETE", "collections", collection, "documents", doc_id, ok=(404,))

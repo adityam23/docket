@@ -130,6 +130,10 @@ class Settings(BaseSettings):
     engine_switch_timeout_s: float = Field(120.0, gt=0)
 
     request_timeout_s: float = Field(120.0, gt=0)
+    # A filing's documents:batch POST embeds every chunk server-side before it
+    # answers, so it gets its own ceiling (a 780-chunk 10-K overran the shared
+    # 120 s). Env-only, like the other ingest-plumbing knobs.
+    ingest_batch_timeout_s: float = Field(900.0, gt=0)
 
     # Ingest/retrieval knobs. The persisted corpus (chunk lineage + doc dedup +
     # job state, NO chunk text — display text comes back from engine hits)

@@ -7,8 +7,13 @@ hand-rolled fake standing in for httpx itself."""
 
 from __future__ import annotations
 
-import httpx
+import json
 
+import httpx
+import pytest
+
+from docket.providers import openai_compat as oc
+from docket.providers.base import EngineDocument
 from docket.providers.openai_compat import OpenAICompatProvider
 
 
@@ -63,6 +68,82 @@ def test_delete_document_404_returns_false_without_raising():
 
     p = _provider_over(handler)
     assert p.delete_document("acme", "ghost#1") is False
+
+
+def _batch_engine(fail_on_batch: int | None = None, status: int = 503):
+    """A mock ``documents:batch`` endpoint recording each request; the batch
+    numbered ``fail_on_batch`` (1-based) answers ``status`` and writes nothing."""
+    log: dict = {"batches": [], "deleted": [], "raw_paths": []}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        log["raw_paths"].append(request.url.raw_path.decode())
+        if request.method == "DELETE":
+            log["deleted"].append(request.url.raw_path.decode().rsplit("/", 1)[-1])
+            return httpx.Response(200)
+        docs = json.loads(request.content)["documents"]
+        log["batches"].append([d["id"] for d in docs])
+        if len(log["batches"]) == fail_on_batch:
+            return httpx.Response(status, json={"error": {"code": "conflict"}})
+        return httpx.Response(201, json={"results": [
+            {"document_id": d["id"], "chunks": 1, "chunk_ids": [f"{d['id']}/c0"]} for d in docs
+        ]})
+
+    return handler, log
+
+
+def _docs(n: int, text: str = "x") -> list[EngineDocument]:
+    return [EngineDocument(f"f#{i}", text, {"page": "1"}) for i in range(n)]
+
+
+def test_post_documents_sends_one_batch_to_the_literal_batch_route():
+    handler, log = _batch_engine()
+    p = _provider_over(handler)
+    assert p.post_documents("acme", _docs(3)) == ["f#0/c0", "f#1/c0", "f#2/c0"]
+    assert log["batches"] == [["f#0", "f#1", "f#2"]]
+    assert log["raw_paths"] == ["/v1/collections/acme/documents:batch"]
+
+
+def test_post_documents_splits_over_the_count_cap(monkeypatch):
+    monkeypatch.setattr(oc, "_BATCH_MAX_DOCS", 2)
+    handler, log = _batch_engine()
+    p = _provider_over(handler)
+    p.post_documents("acme", _docs(5))
+    assert [len(b) for b in log["batches"]] == [2, 2, 1]
+
+
+def test_wire_batches_splits_over_the_byte_cap(monkeypatch):
+    monkeypatch.setattr(oc, "_BATCH_MAX_BYTES", 300 + oc._BATCH_ENVELOPE_BYTES)
+    docs = [{"id": f"d{i}", "content": "y" * 100, "metadata": {}} for i in range(5)]
+    batches = oc._wire_batches(docs)
+    assert [len(b) for b in batches] == [2, 2, 1]
+    assert [d for b in batches for d in b] == docs  # order preserved
+
+
+def test_wire_batches_rejects_a_single_document_over_the_byte_cap(monkeypatch):
+    monkeypatch.setattr(oc, "_BATCH_MAX_BYTES", 100 + oc._BATCH_ENVELOPE_BYTES)
+    with pytest.raises(ValueError, match="over the batch cap"):
+        oc._wire_batches([{"id": "big", "content": "z" * 200, "metadata": {}}])
+
+
+def test_post_documents_rolls_back_committed_batches_when_a_later_one_fails(monkeypatch):
+    monkeypatch.setattr(oc, "_BATCH_MAX_DOCS", 2)
+    handler, log = _batch_engine(fail_on_batch=2, status=409)
+    p = _provider_over(handler)
+    with pytest.raises(httpx.HTTPStatusError):
+        p.post_documents("acme", _docs(5))
+    # Batch 1 committed and is rolled back; batch 2 wrote nothing (and on a 409
+    # its ids may belong to an existing document) so it is left alone; batch 3
+    # was never sent.
+    assert log["deleted"] == ["f%230", "f%231"]
+    assert len(log["batches"]) == 2
+
+
+def test_post_documents_failure_on_first_batch_deletes_nothing():
+    handler, log = _batch_engine(fail_on_batch=1)
+    p = _provider_over(handler)
+    with pytest.raises(httpx.HTTPStatusError):
+        p.post_documents("acme", _docs(3))
+    assert log["deleted"] == []
 
 
 def test_ensure_collection_treats_409_as_success():
@@ -155,3 +236,34 @@ def test_ocr_omits_instruction_when_not_given():
     p = _provider_over(handler)
     assert p.ocr("aGVsbG8=") == ""
     assert captured["body"] == {"image": "aGVsbG8="}
+
+
+def test_batch_post_uses_the_batch_timeout_and_other_calls_the_shared_one():
+    # A filing's documents:batch embeds every chunk before answering, so it
+    # gets its own (longer) ceiling; every other call keeps the shared one.
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen[request.method] = request.extensions["timeout"]["read"]
+        if request.method == "POST":
+            return httpx.Response(201, json={"results": []})
+        return httpx.Response(200)
+
+    p = _provider_over(handler, timeout_s=120.0, batch_timeout_s=900.0)
+    p._client.timeout = httpx.Timeout(120.0)  # the real client's shared timeout
+    p.post_documents("acme", _docs(1))
+    p.delete_document("acme", "f#0")
+    assert seen == {"POST": 900.0, "DELETE": 120.0}
+
+
+def test_list_documents_gets_the_collection_listing():
+    rows = [{"id": "acme#0", "chunk_count": 1, "metadata": {"page": "1"}}]
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["call"] = (request.method, request.url.raw_path.decode())
+        return httpx.Response(200, json=rows)
+
+    p = _provider_over(handler)
+    assert p.list_documents("acme") == rows
+    assert captured["call"] == ("GET", "/v1/collections/acme/documents")

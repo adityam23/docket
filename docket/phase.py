@@ -17,7 +17,7 @@ Semantics (operator-decided, 2026-10-06/07):
   silent indefinite wait).
 - CHAT waiters have priority: while any chat request is waiting to switch
   in, new RETRIEVAL entrants block. This is what lets an ``ask`` preempt a
-  running ingest at the next safe point (the next per-chunk engine call)
+  running ingest at the next safe point (the next per-document engine call)
   instead of queuing behind the whole batch.
 - Empty profile names (``Settings.engine_retrieval_profile`` /
   ``engine_chat_profile``) disable switching entirely (a single-profile

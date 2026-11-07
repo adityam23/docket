@@ -21,6 +21,7 @@ from docket.agent.graph import answer
 from docket.config import Settings
 from docket.ingest.index import Corpus
 from docket.phase import Phase, PhaseCoordinator
+from docket.providers.base import EngineDocument
 from docket.providers.router import PhasedProvider
 from docket.retrieval.retriever import Retriever
 
@@ -67,7 +68,7 @@ def test_retrieval_calls_enter_retrieval_phase():
     provider.rerank("q", ["a", "b"])
     provider.ensure_collection("docket")
     provider.collection_search("docket", "revenue", mode="hybrid", k=5)
-    provider.post_document("docket", "doc#1", "text", {})
+    provider.post_documents("docket", [EngineDocument("doc#1", "text", {})])
     provider.delete_document("docket", "doc#1")
     provider.delete_collection("docket")
 
