@@ -236,10 +236,12 @@ class PhaseCoordinator:
                         self._in_flight += 1
                         depth[phase] = 1
                         return
-                    elif self._in_flight == 0:
-                        # Nobody is mid-request on the outgoing phase: safe
-                        # to switch (D5: never switch with a request in
-                        # flight).
+                    elif self._in_flight == 0 and not self._outranked(phase):
+                        # Nobody is mid-request on the outgoing phase and no
+                        # higher-priority request is waiting for that same
+                        # zero-in-flight window: safe to switch (D5: never
+                        # switch with a request in flight; priority: never
+                        # take the window a waiting question/chat needs).
                         self._switching = True
                     else:
                         self._cond.wait()

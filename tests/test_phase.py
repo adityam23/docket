@@ -525,3 +525,57 @@ def test_waiting_question_search_blocks_new_ingest_entrants():
     assert next_ingest_entered.wait(timeout=5.0)
     t_i2.join(timeout=5.0)
     assert calls == ["retrieval", "ingest"]
+
+
+@pytest.mark.parametrize(
+    ("waiter", "entrant", "target"),
+    [
+        (Phase.CHAT, Phase.INGEST, "ingest"),
+        (Phase.CHAT, Phase.RETRIEVAL, "retrieval"),
+        (Phase.RETRIEVAL, Phase.INGEST, "ingest"),
+    ],
+)
+def test_lower_priority_never_takes_the_window_a_higher_phase_is_waiting_for(
+    waiter, entrant, target
+):
+    """Priority CHAT > RETRIEVAL > INGEST covers the switch itself, not just
+    entrants into the current profile: a lower-priority caller must not open
+    (and consume) the zero-in-flight window while a higher-priority request is
+    waiting for that same window.
+
+    Without this, an ingest document switches the engine away from the profile
+    a waiting question was about to enter -- and that question then waits out
+    the whole document. Inverting "a user question preempts ingest at the next
+    per-document call" (Q11).
+
+    The waiter is injected directly rather than run as a thread: with threads,
+    "a request is waiting over an otherwise idle engine" exists only for the
+    instant of the wake-up race this rule decides, so it cannot be reproduced
+    deterministically."""
+    # Parked on a profile nobody is in flight on: the very next entrant would
+    # switch immediately if the priority rule didn't hold it back.
+    coord, calls = _coordinator(initial_active="chat")
+    with coord._cond:
+        coord._waiters[waiter] += 1
+    entered = threading.Event()
+
+    def enter():
+        with coord.enter(entrant):
+            entered.set()
+
+    t = threading.Thread(target=enter, daemon=True)
+    t.start()
+    time.sleep(0.3)
+    assert calls == [], (
+        f"{entrant.value} switched the engine out from under a waiting {waiter.value}"
+    )
+    assert not entered.is_set()
+
+    # The higher-priority request takes the window, enters, and the lower one
+    # follows (the rule must not wedge the lower prio entrant forever).
+    with coord._cond:
+        coord._waiters[waiter] -= 1
+        coord._cond.notify_all()
+    assert entered.wait(timeout=5.0)
+    t.join(timeout=5.0)
+    assert calls == [target]
