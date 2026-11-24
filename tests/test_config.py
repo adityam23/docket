@@ -70,16 +70,27 @@ def test_frozen_build_never_adopts_the_checkout_root(monkeypatch):
 def test_engine_phase_profile_names_default_and_validate(monkeypatch):
     s = Settings()
     assert (s.engine_retrieval_profile, s.engine_chat_profile) == ("retrieval", "chat")
+    assert s.engine_ingest_profile == "ingest"
 
     for bad in (".leading-dot", "has space", "has/slash", "a" * 129):
         with pytest.raises(ValidationError):
             Settings(engine_retrieval_profile=bad)
         with pytest.raises(ValidationError):
             Settings(engine_chat_profile=bad)
+        with pytest.raises(ValidationError):
+            Settings(engine_ingest_profile=bad)
 
-    # Empty is the documented opt-out (disables phase switching), not rejected.
+    # Empty is the documented opt-out (disables phase switching), not rejected;
+    # an empty ingest name is the narrower opt-out (ingest runs in retrieval).
     s2 = Settings(engine_retrieval_profile="", engine_chat_profile="")
     assert (s2.engine_retrieval_profile, s2.engine_chat_profile) == ("", "")
+    assert Settings(engine_ingest_profile="").engine_ingest_profile == ""
+
+
+def test_ingest_batch_timeout_s_must_be_positive():
+    assert Settings().ingest_batch_timeout_s == 900.0
+    with pytest.raises(ValidationError):
+        Settings(ingest_batch_timeout_s=0.0)
 
 
 def test_engine_switch_timeout_s_must_be_positive():
