@@ -5,11 +5,11 @@
 	// Ask (T07). Steps render with the shared line-glyph set; expandable bodies
 	// show verbatim prompts / context / hits. Monochrome rail; the accent marks
 	// model-touching steps.
-	import { stepMeta, reliability } from '$lib/format.js';
-	import CalcList from '$lib/components/CalcList.svelte';
-	import Chip from '$lib/components/Chip.svelte';
-	import HitCard from '$lib/components/HitCard.svelte';
-	import Icon from '$lib/components/Icon.svelte';
+	import { stepMeta, reliability } from '#lib/format.js';
+	import CalcList from '#lib/components/CalcList.svelte';
+	import Chip from '#lib/components/Chip.svelte';
+	import HitCard from '#lib/components/HitCard.svelte';
+	import Icon from '#lib/components/Icon.svelte';
 
 	let { steps = [], live = false } = $props();
 

@@ -8,7 +8,7 @@
 // calls `kick()` right after starting a job so the indicator updates instantly.
 
 import { writable } from 'svelte/store';
-import { api } from '$lib/api.js';
+import { api } from '#lib/api.js';
 
 function createIngest() {
 	const { subscribe, set } = writable({ running: false, job: null });

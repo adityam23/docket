@@ -11,14 +11,14 @@
 	// every later question sends `session_id` so prior turns are threaded into
 	// the model's context. "New chat" starts fresh.
 	import { onDestroy, tick } from 'svelte';
-	import { api, errMsg } from '$lib/api.js';
-	import { num, caution } from '$lib/format.js';
-	import Answer from '$lib/components/Answer.svelte';
-	import CalcList from '$lib/components/CalcList.svelte';
-	import Chip from '$lib/components/Chip.svelte';
-	import ExplainDrawer from '$lib/components/ExplainDrawer.svelte';
-	import Icon from '$lib/components/Icon.svelte';
-	import Timeline from '$lib/components/Timeline.svelte';
+	import { api, errMsg } from '#lib/api.js';
+	import { num, caution } from '#lib/format.js';
+	import Answer from '#lib/components/Answer.svelte';
+	import CalcList from '#lib/components/CalcList.svelte';
+	import Chip from '#lib/components/Chip.svelte';
+	import ExplainDrawer from '#lib/components/ExplainDrawer.svelte';
+	import Icon from '#lib/components/Icon.svelte';
+	import Timeline from '#lib/components/Timeline.svelte';
 
 	let question = $state('');
 	let scope = $state(null);

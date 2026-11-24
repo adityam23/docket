@@ -10,11 +10,11 @@
 	// old plain /health up/down dot, which couldn't tell "offline" apart from
 	// a minutes-long first-run model download. Detail (phase/reason/full
 	// detail) lives in EnginePanel; this stays a compact, honest one-liner.
-	import { page } from '$app/stores';
-	import { api, errMsg } from '$lib/api.js';
-	import { ingest } from '$lib/stores/ingest.js';
-	import { supervision } from '$lib/stores/supervision.js';
-	import { supervisionTone, supervisionText } from '$lib/format.js';
+	import { page } from '$app/state';
+	import { api, errMsg } from '#lib/api.js';
+	import { ingest } from '#lib/stores/ingest.js';
+	import { supervision } from '#lib/stores/supervision.js';
+	import { supervisionTone, supervisionText } from '#lib/format.js';
 	import Icon from './Icon.svelte';
 
 	const nav = [
@@ -25,7 +25,7 @@
 		{ href: '/settings', label: 'settings' }
 	];
 
-	let path = $derived($page.url.pathname);
+	let path = $derived(page.url.pathname);
 
 	let job = $derived($ingest.job);
 	let ingesting = $derived($ingest.running === true);

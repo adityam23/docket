@@ -9,13 +9,13 @@
 	//              (no session) list flat. Expanding a turn loads the verbatim
 	//              timeline via the shared component.
 	import { onMount } from 'svelte';
-	import { api, errMsg } from '$lib/api.js';
-	import { when, reliability } from '$lib/format.js';
-	import Icon from '$lib/components/Icon.svelte';
-	import Chip from '$lib/components/Chip.svelte';
-	import EnginePanel from '$lib/components/EnginePanel.svelte';
-	import Pivots from '$lib/components/Pivots.svelte';
-	import Timeline from '$lib/components/Timeline.svelte';
+	import { api, errMsg } from '#lib/api.js';
+	import { when, reliability } from '#lib/format.js';
+	import Icon from '#lib/components/Icon.svelte';
+	import Chip from '#lib/components/Chip.svelte';
+	import EnginePanel from '#lib/components/EnginePanel.svelte';
+	import Pivots from '#lib/components/Pivots.svelte';
+	import Timeline from '#lib/components/Timeline.svelte';
 
 	let traces = $state(null);
 	let chats = $state(null);

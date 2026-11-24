@@ -1,11 +1,11 @@
 <script>
 	import '../app.css';
 	import { onMount } from 'svelte';
-	import { page } from '$app/stores';
-	import TopNav from '$lib/components/TopNav.svelte';
-	import { ingest } from '$lib/stores/ingest.js';
-	import { supervision } from '$lib/stores/supervision.js';
-	import { ui } from '$lib/stores/ui.js';
+	import { page } from '$app/state';
+	import TopNav from '#lib/components/TopNav.svelte';
+	import { ingest } from '#lib/stores/ingest.js';
+	import { supervision } from '#lib/stores/supervision.js';
+	import { ui } from '#lib/stores/ui.js';
 
 	let { children } = $props();
 
@@ -24,7 +24,7 @@
 
 	// Turnstile page-enter (T19): re-keying the page container on navigation
 	// replays the staggered .turn entrance on each route's content.
-	let path = $derived($page.url.pathname);
+	let path = $derived(page.url.pathname);
 </script>
 
 <div class="app">

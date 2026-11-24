@@ -4,17 +4,17 @@
 	// full timeline for one trace via the shared component. When the trace
 	// belongs to a Chat session (T21), a breadcrumb names the chat and turn.
 	import { onMount } from 'svelte';
-	import { page } from '$app/stores';
-	import { api, errMsg } from '$lib/api.js';
-	import { when, reliability } from '$lib/format.js';
-	import Answer from '$lib/components/Answer.svelte';
-	import Chip from '$lib/components/Chip.svelte';
-	import Icon from '$lib/components/Icon.svelte';
-	import Timeline from '$lib/components/Timeline.svelte';
+	import { page } from '$app/state';
+	import { api, errMsg } from '#lib/api.js';
+	import { when, reliability } from '#lib/format.js';
+	import Answer from '#lib/components/Answer.svelte';
+	import Chip from '#lib/components/Chip.svelte';
+	import Icon from '#lib/components/Icon.svelte';
+	import Timeline from '#lib/components/Timeline.svelte';
 
 	let trace = $state(null);
 	let error = $state('');
-	let id = $derived($page.params.id);
+	let id = $derived(page.params.id);
 
 	async function load() {
 		trace = null;
