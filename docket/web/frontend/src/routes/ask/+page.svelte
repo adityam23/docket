@@ -14,6 +14,7 @@
 	import { api, errMsg } from '$lib/api.js';
 	import { num, caution } from '$lib/format.js';
 	import Answer from '$lib/components/Answer.svelte';
+	import CalcList from '$lib/components/CalcList.svelte';
 	import Chip from '$lib/components/Chip.svelte';
 	import ExplainDrawer from '$lib/components/ExplainDrawer.svelte';
 	import Icon from '$lib/components/Icon.svelte';
@@ -127,7 +128,7 @@
 	<div class="row spread wrap" style="align-items: flex-end">
 		<div style="min-width: 0">
 			<h1 class="page-title">ask</h1>
-			<p class="page-sub">Grounded, cited answers with a reliability signal.</p>
+			<p class="page-sub">Grounded answers, cited to the page.</p>
 		</div>
 		<div class="row wrap">
 			{#if scope}
@@ -176,6 +177,13 @@
 				<div class="who caps">answer</div>
 				<Answer text={t.res.answer} />
 
+				{#if t.res.calculations?.length}
+					<div class="calc-block">
+						<div class="who caps">calculations</div>
+						<CalcList calculations={t.res.calculations} />
+					</div>
+				{/if}
+
 				{#if warn}
 					<div class="glance {warn.tone}">
 						<Icon name="alert" size={15} /><span>{warn.text}</span>
@@ -219,6 +227,7 @@
 	.stream > :first-child { margin-top: 0 !important; }
 
 	.intro { text-align: center; color: var(--text-mute); margin: auto; max-width: 44ch; padding-bottom: 40px; }
+	.calc-block { margin-top: 14px; }
 	.intro-glyph { color: var(--text-faint); display: grid; place-items: center; }
 	.intro-copy { margin-top: 10px; color: var(--text-dim); }
 

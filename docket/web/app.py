@@ -222,6 +222,7 @@ def _answer_payload(question: str, *, session_id: str | None = None, on_step=Non
         "banner": reliability_banner(trace["reliability"]),
         "surprisal": trace["surprisal"],
         "detail": trace["detail"],  # aggregation breakdown (op/result/unit/per-item) or None
+        "calculations": trace.get("calculations") or [],  # calculator audit trail (QA)
         "citations": trace["citations"],
         "hits": [hit_view(h) for h in (result.hits or [])],
         "queries": trace["queries"],

@@ -22,6 +22,7 @@
 		grow: 'M4 19L10 13l3.5 3.5L20 9M20 9h-5.5M20 9v5.5',
 		stream: 'M3 7h18M3 12h18M3 17h18', // layers of feed lines
 		chart: 'M4 20V10M10 20V4M16 20v-8M22 20H2',
+		calc: 'M6 3h12v18H6zM9 7h6M9 11h2M13 11h2M9 14.5h2M13 14.5h2M9 18h2M13 18h2', // calculator
 		flask: 'M10 3h4M10 3v6l-5.5 9.5A1.8 1.8 0 0 0 6 21h12a1.8 1.8 0 0 0 1.5-2.5L14 9V3M7.5 15h9',
 		back: 'M14 6l-6 6 6 6',
 		chevron: 'M9 6l6 6-6 6',
