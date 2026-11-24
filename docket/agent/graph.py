@@ -8,7 +8,9 @@ not two — CLAUDE.md reusability). It never imports LangGraph itself, so it run
 under the base install and in the offline test suite.
 
 Flow per hop:
-  retrieve → format numbered context → grounded chat (logprobs on) →
+  retrieve → format numbered context → grounded chat (logprobs on; any
+  ``<calc>`` expressions are evaluated by ``tools.calculate`` and the model
+  writes its final answer from the exact results — ``grounded_chat``) →
   reliability_label(logprobs). If the answer looks low-confidence and hops
   remain, ask the model for better search terms and re-query (multi-hop recall).
 
@@ -41,11 +43,11 @@ from dataclasses import dataclass, field
 
 from ..config import Settings, load_settings
 from ..phase import Phase, provider_phase
-from ..providers.base import Provider
+from ..providers.base import ChatResult, Provider
 from ..report.schema import Citation
 from ..retrieval.retriever import Retriever
 from ..trust.reliability import reliability_score
-from .tools import aggregate, parse_number
+from .tools import aggregate, calculate, parse_number
 from .trace import StepSink, hit_view
 
 _CITE = re.compile(r"\[(\d+)\]")
@@ -67,7 +69,22 @@ _SYSTEM = (
     "You are a careful document analyst. Answer ONLY from the numbered context. "
     "Cite every claim with the bracketed source number, e.g. [2]. If the context "
     f"does not contain the answer, say exactly: '{REFUSAL}' "
-    "Do not use outside knowledge."
+    "Do not use outside knowledge. Never do arithmetic in your head: whenever "
+    "the answer needs a calculation, write it as <calc>EXPRESSION</calc> using "
+    "only numbers, + - * / and parentheses, e.g. <calc>(23601-16434)/16434*100</calc>. "
+    "You will be given the exact results before writing your final answer."
+)
+
+# The calculator protocol (``grounded_chat``): the model marks each needed
+# computation with a <calc> tag; docket evaluates them deterministically and a
+# second pass writes the final answer from the exact results.
+_CALC_TAG = re.compile(r"<calc>(.*?)</calc>", re.DOTALL)
+_MAX_CALCS = 12
+_CALC_FOLLOWUP = (
+    "Calculator results (exact):\n{results}\n\n"
+    "Now write your final answer using these results; do not compute anything "
+    "yourself and do not include <calc> tags. Keep the [n] citation for every "
+    "figure taken from the context."
 )
 
 
@@ -83,6 +100,10 @@ class Answer:
     # Structured breakdown for aggregation answers (op/result/unit/per-item),
     # None for plain QA. Lets the report/web show an auditable line-item table.
     detail: dict | None = None
+    # Calculator audit trail for QA answers: [{expression, result}] in the
+    # order the model requested them (``result`` is an "error: ..." string
+    # when the expression could not be evaluated).
+    calculations: list[dict] = field(default_factory=list)
 
 
 def _format_context(hits: list[dict]) -> str:
@@ -108,6 +129,68 @@ def _grounded_messages(
         msgs.extend(history)
     msgs.append({"role": "user", "content": user})
     return msgs
+
+
+def _fmt_calc(value: float) -> str:
+    return format(value, ".12g")
+
+
+def _run_calcs(expressions: list[str]) -> list[dict]:
+    """Evaluate each distinct expression once, in first-seen order."""
+    out: list[dict] = []
+    for expr in dict.fromkeys(e.strip() for e in expressions):
+        if len(out) == _MAX_CALCS:
+            out.append({"expression": expr, "result": "error: too many calculations"})
+            break
+        try:
+            result = _fmt_calc(calculate(expr))
+        except (ValueError, ZeroDivisionError) as e:
+            result = f"error: {e}"
+        out.append({"expression": expr, "result": result})
+    return out
+
+
+def _resolve_tags(text: str, calcs: list[dict]) -> str:
+    """Replace any <calc> tag the final pass still emitted with its value, so
+    a raw tag never reaches the user (evaluating any new expression too)."""
+    known = {c["expression"]: c["result"] for c in calcs}
+
+    def sub(m: re.Match) -> str:
+        expr = m.group(1).strip()
+        if expr not in known:
+            known[expr] = _run_calcs([expr])[0]["result"]
+        return known[expr]
+
+    return _CALC_TAG.sub(sub, text)
+
+
+def grounded_chat(
+    provider: Provider,
+    messages: list[dict],
+    *,
+    max_tokens: int,
+    on_step: StepSink | None = None,
+    hop: int = 0,
+) -> tuple[ChatResult, list[dict]]:
+    """The ONE grounded generation call, with the calculator protocol: when the
+    first pass requests ``<calc>`` expressions, evaluate them with
+    ``tools.calculate`` and run a second pass that writes the final answer from
+    the exact results. Returns ``(final result, calculations)``. Shared by
+    ``answer()`` and the FinanceBench direct path so both evaluate the same way."""
+    first = provider.chat(messages, temperature=0.0, max_tokens=max_tokens)
+    expressions = _CALC_TAG.findall(first.text or "")
+    if not expressions:
+        return first, []
+    calcs = _run_calcs(expressions)
+    _emit(on_step, "calc", hop=hop, calculations=calcs)
+    results = "\n".join(f"{c['expression']} = {c['result']}" for c in calcs)
+    followup = messages + [
+        {"role": "assistant", "content": first.text},
+        {"role": "user", "content": _CALC_FOLLOWUP.format(results=results)},
+    ]
+    final = provider.chat(followup, temperature=0.0, max_tokens=max_tokens)
+    text = _resolve_tags(final.text or "", calcs)
+    return ChatResult(text=text, logprobs=final.logprobs, raw=final.raw), calcs
 
 
 # Context-window management for threaded conversations (T21): keep the most
@@ -497,6 +580,7 @@ def answer(
     hits = retriever.retrieve(question, k=s.context_chunks)
     _emit(on_step, "retrieve", hop=0, query=question, hits=[hit_view(h) for h in hits])
     res = None
+    calculations: list[dict] = []
     reliability, surprisal = "unknown", float("nan")
     max_hops = max(1, s.max_hops)
     for hop in range(max_hops):
@@ -511,7 +595,9 @@ def answer(
         # in the gap between them. iterative_retrieve runs OUTSIDE this
         # block, below, in RETRIEVAL.
         with provider_phase(provider, Phase.CHAT):
-            res = provider.chat(messages, temperature=0.0, max_tokens=700)
+            res, calculations = grounded_chat(
+                provider, messages, max_tokens=700, on_step=on_step, hop=hop
+            )
             reliability, surprisal = reliability_score(res.logprobs or [])
             _emit(on_step, "response", hop=hop, text=res.text, reliability=reliability)
             # Re-query only when the label is genuinely low AND we have a signal
@@ -536,6 +622,7 @@ def answer(
         citations=_citations(text, hits),
         hits=hits,
         queries=queries,
+        calculations=calculations,
     )
 
 

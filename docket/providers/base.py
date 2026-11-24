@@ -24,6 +24,15 @@ class Capability(Flag):
     SAE = auto()            # Gemma Scope feats -> Tier-3 lab mode (roadmap)
 
 
+@dataclass(frozen=True)
+class EngineDocument:
+    """One docket chunk as an engine document: the wire shape of mettle's
+    ``documents:batch`` entries (``id``/``content``/``metadata``)."""
+    id: str
+    text: str
+    metadata: dict[str, str]
+
+
 @dataclass
 class ChatResult:
     text: str
@@ -64,9 +73,8 @@ class Provider(Protocol):
     def embed(self, texts: list[str]) -> list[list[float]]: ...
     def rerank(self, query: str, documents: list[str]) -> list[float]: ...
     def ensure_collection(self, collection: str) -> None: ...
-    def post_document(
-        self, collection: str, doc_id: str, text: str, metadata: dict[str, str] | None = None
-    ) -> list[str]: ...
+    def post_documents(self, collection: str, documents: list[EngineDocument]) -> list[str]: ...
+    def list_documents(self, collection: str) -> list[dict]: ...
     def delete_document(self, collection: str, doc_id: str) -> bool: ...
     def collection_search(
         self,

@@ -9,9 +9,10 @@ chunk unranked for tests where a reranker does the ordering).
 real provider's ``if allowlist:`` in ``openai_compat.py`` — a separate ticket
 stops an empty scope reaching the provider at all). ``delete_document`` is
 False for an id it never held (mirrors the real 404 -> False). ``fail_post_at``
-(B4) makes the Nth ``post_document`` call across the fake's whole lifetime
-raise, to exercise per-document ingest failure/rollback without a bespoke
-local fake per test file."""
+(B4) makes the Nth ``post_documents`` call (one per ingested document) across
+the fake's whole lifetime raise and write nothing -- mettle's all-or-nothing
+batch -- to exercise per-document ingest failure without a bespoke local fake
+per test file."""
 
 from __future__ import annotations
 
@@ -47,8 +48,8 @@ class ScriptedProvider:
 
 
 class FakeEngine:
-    """Full engine double: chat + the collection surface (ensure/post/delete
-    document, search, optional rerank), covering both the "ingest + chat" role
+    """Full engine double: chat + the collection surface (ensure/post/list/
+    delete document, search, optional rerank), covering both the "ingest + chat" role
     (``posted``/``deleted`` tracking) and the "search" role."""
 
     def __init__(
@@ -72,8 +73,8 @@ class FakeEngine:
         self.posted: list[tuple[str, str, dict]] = []  # (collection, doc_id, metadata)
         self.deleted: list[tuple[str, str]] = []        # (collection, doc_id)
         self.last_allowlist: list[str] | None = None
-        # 1-based count of post_document calls across this fake's lifetime; the
-        # call AT this count raises instead of succeeding (B4 ingest-failure
+        # 1-based count of post_documents calls across this fake's lifetime;
+        # the call AT this count raises and writes nothing (B4 ingest-failure
         # tests). None (default) never fails.
         self._fail_post_at = fail_post_at
         self._fail_post_exc = fail_post_exc
@@ -89,13 +90,17 @@ class FakeEngine:
     def ensure_collection(self, collection: str) -> None:
         self.ensure_collection_calls += 1
 
-    def post_document(self, collection, doc_id, text, metadata=None):
+    def post_documents(self, collection, documents):
         self._post_calls += 1
         if self._fail_post_at is not None and self._post_calls == self._fail_post_at:
-            raise self._fail_post_exc or RuntimeError("simulated post_document failure")
-        self.posted.append((collection, doc_id, metadata or {}))
-        self._docs[doc_id] = text
-        return [f"{doc_id}/chunk/0"]
+            raise self._fail_post_exc or RuntimeError("simulated post_documents failure")
+        for d in documents:
+            self.posted.append((collection, d.id, d.metadata))
+            self._docs[d.id] = d.text
+        return [f"{d.id}/chunk/0" for d in documents]
+
+    def list_documents(self, collection) -> list[dict]:
+        return [{"id": cid, "chunk_count": 1, "metadata": {}} for cid in self._docs]
 
     def delete_document(self, collection, doc_id) -> bool:
         self.deleted.append((collection, doc_id))

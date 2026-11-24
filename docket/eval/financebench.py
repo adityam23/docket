@@ -26,7 +26,7 @@ import re
 import time
 from dataclasses import dataclass, field
 
-from ..agent.graph import REFUSAL, _format_context, _grounded_messages
+from ..agent.graph import REFUSAL, _format_context, _grounded_messages, grounded_chat
 from ..agent.graph import answer as graph_answer
 from ..agent.graph import plan_operation
 from ..config import Settings
@@ -437,7 +437,7 @@ def generate_financebench(provider: Provider, items: list[dict], *,
         messages = _grounded_messages(item["question"], context)
         t0 = time.perf_counter()
         try:
-            text = provider.chat(messages, max_tokens=max_tokens, temperature=0.0).text or ""
+            text = grounded_chat(provider, messages, max_tokens=max_tokens)[0].text or ""
         except Exception as e:
             text = f"[error: {e}]"
         latency_ms = round((time.perf_counter() - t0) * 1000)

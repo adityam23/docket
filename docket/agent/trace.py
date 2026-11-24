@@ -169,6 +169,7 @@ class TraceCollector:
             "hops": len(answer.queries or [self.question]),
             "elapsed_ms": elapsed_ms,
             "detail": answer.detail,
+            "calculations": answer.calculations,
             "path": "aggregate" if answer.detail else "qa",
             "steps": self.steps,
         }
@@ -183,6 +184,8 @@ def compact_step(kind: str, info: dict) -> dict:
             out[key] = info[key]
     if "hits" in info and isinstance(info["hits"], list):
         out["hits"] = len(info["hits"])
+    if "calculations" in info and isinstance(info["calculations"], list):
+        out["calculations"] = len(info["calculations"])
     if "text" in info and isinstance(info["text"], str):
         out["chars"] = len(info["text"])
     if "items" in info and isinstance(info["items"], list):

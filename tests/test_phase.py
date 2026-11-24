@@ -447,3 +447,135 @@ def test_unknown_active_profile_switches_instead_of_reprobing_forever():
             pass
     assert probes == [1]
     assert switches == ["chat"]
+
+
+# -- ingest phase (Q11) ------------------------------------------------------
+
+
+def test_ingest_enters_the_ingest_profile():
+    coord, calls = _coordinator(initial_active="retrieval")
+    with coord.enter(Phase.INGEST):
+        pass
+    with coord.enter(Phase.RETRIEVAL):
+        pass
+    assert calls == ["ingest", "retrieval"]
+
+
+def test_empty_ingest_profile_runs_ingest_in_the_retrieval_profile():
+    coord, calls = _coordinator(
+        initial_active="retrieval", settings=_settings(engine_ingest_profile=""),
+    )
+    with coord.enter(Phase.INGEST):
+        pass
+    with coord.enter(Phase.RETRIEVAL):
+        pass
+    assert calls == []  # a two-profile engine: ingest and search share one profile
+
+
+def test_waiting_question_search_blocks_new_ingest_entrants():
+    # A question's RETRIEVAL step outranks ingest, so a running ingest is
+    # preempted at its next call, not after the whole batch.
+    coord, calls = _coordinator(initial_active="ingest")
+
+    entered_ingest = threading.Event()
+    release_ingest = threading.Event()
+
+    def hold_ingest():
+        with coord.enter(Phase.INGEST):
+            entered_ingest.set()
+            release_ingest.wait(timeout=5.0)
+
+    t_i1 = threading.Thread(target=hold_ingest, daemon=True)
+    t_i1.start()
+    assert entered_ingest.wait(timeout=2.0)
+
+    search_entered = threading.Event()
+    search_released = threading.Event()
+
+    def do_search():
+        with coord.enter(Phase.RETRIEVAL):
+            search_entered.set()
+            search_released.wait(timeout=5.0)
+
+    t_s = threading.Thread(target=do_search, daemon=True)
+    t_s.start()
+    time.sleep(0.2)
+    assert not search_entered.is_set()
+
+    next_ingest_entered = threading.Event()
+
+    def next_ingest():
+        with coord.enter(Phase.INGEST):
+            next_ingest_entered.set()
+
+    t_i2 = threading.Thread(target=next_ingest, daemon=True)
+    t_i2.start()
+    time.sleep(0.3)
+    assert not next_ingest_entered.is_set(), "new ingest entrant jumped ahead of a waiting search"
+
+    release_ingest.set()
+    t_i1.join(timeout=5.0)
+    assert search_entered.wait(timeout=5.0)
+    assert calls == ["retrieval"]
+    time.sleep(0.2)
+    assert not next_ingest_entered.is_set()
+
+    search_released.set()
+    t_s.join(timeout=5.0)
+    assert next_ingest_entered.wait(timeout=5.0)
+    t_i2.join(timeout=5.0)
+    assert calls == ["retrieval", "ingest"]
+
+
+@pytest.mark.parametrize(
+    ("waiter", "entrant", "target"),
+    [
+        (Phase.CHAT, Phase.INGEST, "ingest"),
+        (Phase.CHAT, Phase.RETRIEVAL, "retrieval"),
+        (Phase.RETRIEVAL, Phase.INGEST, "ingest"),
+    ],
+)
+def test_lower_priority_never_takes_the_window_a_higher_phase_is_waiting_for(
+    waiter, entrant, target
+):
+    """Priority CHAT > RETRIEVAL > INGEST covers the switch itself, not just
+    entrants into the current profile: a lower-priority caller must not open
+    (and consume) the zero-in-flight window while a higher-priority request is
+    waiting for that same window.
+
+    Without this, an ingest document switches the engine away from the profile
+    a waiting question was about to enter -- and that question then waits out
+    the whole document. Inverting "a user question preempts ingest at the next
+    per-document call" (Q11).
+
+    The waiter is injected directly rather than run as a thread: with threads,
+    "a request is waiting over an otherwise idle engine" exists only for the
+    instant of the wake-up race this rule decides, so it cannot be reproduced
+    deterministically."""
+    # Parked on a profile nobody is in flight on: the very next entrant would
+    # switch immediately if the priority rule didn't hold it back.
+    coord, calls = _coordinator(initial_active="chat")
+    with coord._cond:
+        coord._waiters[waiter] += 1
+    entered = threading.Event()
+
+    def enter():
+        with coord.enter(entrant):
+            entered.set()
+
+    t = threading.Thread(target=enter, daemon=True)
+    t.start()
+    time.sleep(0.3)
+    assert calls == [], (
+        f"{entrant.value} switched the engine out from under a waiting {waiter.value}"
+    )
+    assert not entered.is_set()
+
+    # The higher-priority request takes the window, enters, and the lower one
+    # follows (the rule must not wedge the lower prio entrant forever).
+    with coord._cond:
+        coord._waiters[waiter] -= 1
+        coord._cond.notify_all()
+    assert entered.wait(timeout=5.0)
+    t.join(timeout=5.0)
+    assert calls == [target]

@@ -13,19 +13,23 @@ Per-document atomicity (B4, contract D3): each document's lineage is persisted
 to disk the moment ALL of its chunks are confirmed posted — never batched up
 and saved only at the very end. If a document's POST fails partway through
 (a dropped model slot, any other HTTP error), that document is recorded
-``"failed"`` with the reason, no lineage is written for it, its already-posted
-chunks are best-effort deleted (so a retry doesn't 409 on them), and the batch
+``"failed"`` with the reason, no lineage is written for it, and the batch
 moves on to the next document rather than aborting — see ``_ingest_doc``.
+A client-side timeout is the one failure after which mettle may still commit
+the filing, so before any filing is posted its lineage-less engine documents
+are swept (``OrphanSweep``) and a retry never 409s on them.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import threading
 from typing import Callable, Optional
 
 from ..config import Settings, load_settings
-from ..providers.base import Provider
+from ..phase import Phase, provider_phase
+from ..providers.base import EngineDocument, Provider
 from ..providers.router import get_provider
 from .chunk import FILING_FIELDS, Chunk, chunk_pages
 from .index import Corpus
@@ -82,6 +86,41 @@ def _ready_provider(settings: Settings) -> Provider:
     return provider
 
 
+class OrphanSweep:
+    """Delete a filing's engine documents that have no lineage, just before
+    the filing is (re-)posted. They are left behind when a ``documents:batch``
+    POST times out client-side but mettle commits it anyway: docket marked the
+    filing failed and wrote no lineage, so a retry would 409 on every id.
+
+    Scoped to the filing being posted (ids ``{doc_id}#{n}``, the chunker's
+    shape) and to ids with no lineage row, so it can never touch a
+    lineage-backed chunk or another filing's documents. The collection is
+    listed once per ingest run, lazily, on the first filing that is actually
+    posted — runs that skip everything never pay for the listing."""
+
+    def __init__(self, provider: Provider, collection: str, corpus: Corpus) -> None:
+        self._provider = provider
+        self._collection = collection
+        self._corpus = corpus
+        self._engine_ids: set[str] | None = None
+
+    def __call__(self, doc_id: str) -> int:
+        """Sweep ``doc_id``'s orphans; returns how many were deleted."""
+        if self._engine_ids is None:
+            self._engine_ids = {
+                d["id"] for d in self._provider.list_documents(self._collection)
+            }
+        own = re.compile(rf"{re.escape(doc_id)}#\d+")
+        orphans = sorted(
+            i for i in self._engine_ids
+            if own.fullmatch(i) and self._corpus.find(i) is None
+        )
+        for chunk_id in orphans:
+            self._provider.delete_document(self._collection, chunk_id)
+            self._engine_ids.discard(chunk_id)
+        return len(orphans)
+
+
 def _emitter(on_event: Optional[StageEvent]) -> Callable[..., None]:
     """The one ``emit(doc_id, stage, **info)`` shape over an optional
     ``on_event`` sink (``None`` on the silent CLI path) — previously hand-rolled
@@ -106,12 +145,13 @@ def _ingest_doc(
     collection: str,
     settings: Settings,
     emit: Callable[..., None],
+    sweep: OrphanSweep,
     empty_reason: str = "no extractable text",
 ) -> str:
     """Chunk, POST and persist ONE document — the per-document tail shared by
     ``ingest_paths`` (PDF front, pages come from ``pdf_to_pages``) and
     ``load_samples`` (plain-text front, pages ship bundled): chunk →
-    skip-if-empty → POST every chunk → persist lineage → done. One
+    skip-if-empty → batch-POST the chunks → persist lineage → done. One
     implementation instead of two near-identical copies (CLAUDE.md).
 
     Lineage is saved to ``settings.index_dir`` immediately after this
@@ -119,12 +159,15 @@ def _ingest_doc(
     failure on a LATER document can never leave an EARLIER document's
     already-posted chunks without a matching lineage row.
 
-    If any chunk's POST raises (``SlotUnavailable``/503, or any other HTTP
-    error — mettle writes nothing engine-side for a failed POST), this
-    document is marked ``"failed"`` with the reason, no lineage is written for
-    it, and every chunk of THIS document already posted is best-effort
-    DELETEd (so a retry doesn't 409 on them). The caller is expected to
-    continue with the next document rather than aborting the whole batch.
+    The document's chunks go out as ONE ``post_documents`` call, which is
+    all-or-nothing engine-side (mettle's ``documents:batch``; the provider
+    splits an oversize filing and rolls back committed parts on failure). If
+    it raises (``SlotUnavailable``/503, 409, any other HTTP error), this
+    document is marked ``"failed"`` with the reason and no lineage is written
+    for it. The caller is expected to continue with the next document rather
+    than aborting the whole batch. ``sweep`` first deletes this filing's
+    lineage-less leftovers from an earlier timed-out attempt (a failing sweep
+    fails the document the same way).
 
     Returns the outcome: ``"done"``, ``"skipped"``, or ``"failed"``.
     """
@@ -141,23 +184,20 @@ def _ingest_doc(
         emit(doc_id, "skipped", reason=empty_reason)
         return "skipped"
 
-    emit(doc_id, "post", chunks=len(chunks))
-    posted: list[str] = []
+    documents = [
+        EngineDocument(
+            ch.chunk_id, ch.text,
+            {"page": str(ch.page), **{f: getattr(ch, f) for f in FILING_FIELDS}},
+        )
+        for ch in chunks
+    ]
     try:
-        for ch in chunks:
-            provider.post_document(
-                collection,
-                ch.chunk_id,
-                ch.text,
-                {"page": str(ch.page), **{f: getattr(ch, f) for f in FILING_FIELDS}},
-            )
-            posted.append(ch.chunk_id)
+        # One logical block: the sweep's list/deletes and the POST share one
+        # INGEST hold, so a question can't wedge a profile flip between them.
+        with provider_phase(provider, Phase.INGEST):
+            emit(doc_id, "post", chunks=len(chunks), swept=sweep(doc_id))
+            provider.post_documents(collection, documents)
     except Exception as e:  # noqa: BLE001 - one bad document must not sink the batch (D3)
-        for chunk_id in posted:
-            try:
-                provider.delete_document(collection, chunk_id)
-            except Exception:  # noqa: BLE001 - best-effort cleanup; a retry re-POSTs anyway
-                pass
         emit(doc_id, "failed", reason=str(e))
         return "failed"
 
@@ -201,12 +241,11 @@ def ingest_paths(
 
     Resolved (D5/phase coordinator ticket): this seam is kept as a no-op
     hook, deliberately NOT wired to a pause/preempt behaviour. Ask-preempts-
-    ingest is already provided at finer (per-chunk, not per-document)
-    granularity by ``providers/router.py``'s per-call phase wrapping --
-    every ``post_document``/``delete_document`` call independently enters the
-    RETRIEVAL phase via the coordinator, and a waiting chat request already
-    blocks new RETRIEVAL entrants from the next chunk's POST (see
-    ``docket/phase.py``). Pausing the whole batch here on top of that would
+    ingest is already provided per document by ``providers/router.py``'s
+    per-call phase wrapping -- each document's sweep+POST block (and each
+    scanned page's OCR call) enters the INGEST phase via the coordinator, and
+    a waiting question (RETRIEVAL or CHAT) already blocks new INGEST entrants
+    from the next document (see ``docket/phase.py``). Pausing the whole batch here on top of that would
     be a second, coarser preemption mechanism for the same job -- CLAUDE.md:
     one concept, one implementation. The seam stays for a genuinely different
     future need (e.g. an operator-initiated "pause this ingest job" button),
@@ -224,6 +263,7 @@ def ingest_paths(
     emit = _emitter(on_event)
     pause = between_documents or _noop
     provider = _ready_provider(s)  # one provider + one ensure_collection per run
+    sweep = OrphanSweep(provider, s.engine_collection, c)
 
     for path in paths:
         doc_id = doc_id_of(path)
@@ -238,7 +278,7 @@ def ingest_paths(
                 doc_id, pages,
                 source=src, meta=meta, corpus=c,
                 provider=provider, collection=s.engine_collection, settings=s,
-                emit=emit,
+                emit=emit, sweep=sweep,
             )
             if outcome == "done":
                 seen.add(doc_id)
