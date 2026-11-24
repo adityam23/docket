@@ -6,7 +6,7 @@
 // hammer the server during a minutes-long first-run model download.
 
 import { writable } from 'svelte/store';
-import { api, errMsg } from '$lib/api.js';
+import { api, errMsg } from '#lib/api.js';
 
 const ACTIVE_INTERVAL_MS = 2000;
 const HIDDEN_INTERVAL_MS = 15000;

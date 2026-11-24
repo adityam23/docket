@@ -7,11 +7,11 @@
 	// backend doesn't serve (a live DE pipeline, FinanceBench) degrade to an
 	// honest "not configured" face — never a fake number.
 	import { onMount } from 'svelte';
-	import { api, errMsg } from '$lib/api.js';
-	import { num, pct, bytesish, when, reliability } from '$lib/format.js';
-	import Chip from '$lib/components/Chip.svelte';
-	import Icon from '$lib/components/Icon.svelte';
-	import Tile from '$lib/components/Tile.svelte';
+	import { api, errMsg } from '#lib/api.js';
+	import { num, pct, bytesish, when, reliability } from '#lib/format.js';
+	import Chip from '#lib/components/Chip.svelte';
+	import Icon from '#lib/components/Icon.svelte';
+	import Tile from '#lib/components/Tile.svelte';
 
 	let ov = $state(null);
 	let traces = $state(null);

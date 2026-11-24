@@ -6,7 +6,7 @@
 	// clean. Variants: `hero` = boldly accent-filled (the few); everything else
 	// is a dark monochrome field.
 	import { onMount } from 'svelte';
-	import { flipFace, tilt } from '$lib/motion.js';
+	import { flipFace, tilt } from '#lib/motion.js';
 	import Icon from './Icon.svelte';
 
 	let {

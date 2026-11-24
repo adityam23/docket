@@ -6,13 +6,13 @@
 	// navigation. Dense work surface; typographic rows, tabular figures, no
 	// chrome.
 	import { onMount } from 'svelte';
-	import { api, errMsg, MAX_PDF_BYTES } from '$lib/api.js';
-	import { ingest } from '$lib/stores/ingest.js';
-	import { num, bytesish, gb, stage as stageInfo } from '$lib/format.js';
-	import Chip from '$lib/components/Chip.svelte';
-	import Icon from '$lib/components/Icon.svelte';
-	import Meter from '$lib/components/Meter.svelte';
-	import StatCard from '$lib/components/StatCard.svelte';
+	import { api, errMsg, MAX_PDF_BYTES } from '#lib/api.js';
+	import { ingest } from '#lib/stores/ingest.js';
+	import { num, bytesish, gb, stage as stageInfo } from '#lib/format.js';
+	import Chip from '#lib/components/Chip.svelte';
+	import Icon from '#lib/components/Icon.svelte';
+	import Meter from '#lib/components/Meter.svelte';
+	import StatCard from '#lib/components/StatCard.svelte';
 
 	let corpus = $state(null);
 	let capacity = $state(null);

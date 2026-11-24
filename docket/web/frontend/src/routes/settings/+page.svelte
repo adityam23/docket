@@ -5,9 +5,9 @@
 	// overlay); provider API keys via POST /api/config/keys (0600, never echoed).
 	// Appearance (density / motion) is a client-side preference in the ui store.
 	import { onMount } from 'svelte';
-	import { api, errMsg } from '$lib/api.js';
-	import { ui } from '$lib/stores/ui.js';
-	import Chip from '$lib/components/Chip.svelte';
+	import { api, errMsg } from '#lib/api.js';
+	import { ui } from '#lib/stores/ui.js';
+	import Chip from '#lib/components/Chip.svelte';
 
 	let cfg = $state(null);
 	let health = $state(null);

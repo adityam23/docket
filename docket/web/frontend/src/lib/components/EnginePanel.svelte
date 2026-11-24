@@ -7,10 +7,10 @@
 	// reserved for the reliability signal (design-language §3), so slot states
 	// read as neutral text; only a hard error takes `.bad`.
 	import { onMount, onDestroy } from 'svelte';
-	import { api, errMsg } from '$lib/api.js';
-	import { gb, supervisionTone, supervisionText } from '$lib/format.js';
-	import { supervision } from '$lib/stores/supervision.js';
-	import Icon from '$lib/components/Icon.svelte';
+	import { api, errMsg } from '#lib/api.js';
+	import { gb, supervisionTone, supervisionText } from '#lib/format.js';
+	import { supervision } from '#lib/stores/supervision.js';
+	import Icon from '#lib/components/Icon.svelte';
 
 	let eng = $state(null);       // GET /api/engine payload
 	let err = $state('');

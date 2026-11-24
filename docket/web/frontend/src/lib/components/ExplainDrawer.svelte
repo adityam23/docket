@@ -9,12 +9,12 @@
 	//               deliberately deferred behind the accuracy push (not built
 	//               yet) — rendered as an honest "not available" note, never a
 	//               locked tease.
-	import { api, errMsg } from '$lib/api.js';
-	import { filingCite } from '$lib/format.js';
-	import HitCard from '$lib/components/HitCard.svelte';
-	import Icon from '$lib/components/Icon.svelte';
-	import Pivots from '$lib/components/Pivots.svelte';
-	import Timeline from '$lib/components/Timeline.svelte';
+	import { api, errMsg } from '#lib/api.js';
+	import { filingCite } from '#lib/format.js';
+	import HitCard from '#lib/components/HitCard.svelte';
+	import Icon from '#lib/components/Icon.svelte';
+	import Pivots from '#lib/components/Pivots.svelte';
+	import Timeline from '#lib/components/Timeline.svelte';
 
 	// res = the /api/ask done payload for one assistant turn.
 	let { res, labAvailable = false } = $props();

@@ -1,7 +1,7 @@
 <script>
 	// A model answer rendered as formatted, citation-pilled text. Shared by the
 	// Ask view and the per-chat permalink so both read identically.
-	import { renderAnswer } from '$lib/markdown.js';
+	import { renderAnswer } from '#lib/markdown.js';
 
 	let { text = '' } = $props();
 </script>
